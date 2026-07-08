@@ -1,0 +1,100 @@
+package beakslack
+
+import "context"
+
+type API interface {
+	RegisterChannel(Channel) error
+}
+
+type Plugin struct{}
+
+type Channel struct{}
+
+type Metadata struct {
+	ID          string
+	Platform    string
+	Label       string
+	Description string
+}
+
+type Capabilities struct {
+	DirectChat     bool
+	GroupChat      bool
+	Text           bool
+	Media          bool
+	BlockStreaming bool
+}
+
+type SettingsSchema struct {
+	Type                 string         `json:"type"`
+	AdditionalProperties bool           `json:"additionalProperties"`
+	Properties           map[string]any `json:"properties"`
+	Required             []string       `json:"required,omitempty"`
+}
+
+func New() Plugin {
+	return Plugin{}
+}
+
+func Register(api API) error {
+	return New().Register(api)
+}
+
+func (Plugin) Register(api API) error {
+	return api.RegisterChannel(Channel{})
+}
+
+func (Plugin) Channel() Channel {
+	return Channel{}
+}
+
+func (Channel) Metadata() Metadata {
+	return Metadata{
+		ID:          ID,
+		Platform:    Platform,
+		Label:       "Slack",
+		Description: "Slack connector for Beak channel gateway sessions",
+	}
+}
+
+func (Channel) Capabilities() Capabilities {
+	return Capabilities{
+		DirectChat:     true,
+		GroupChat:      true,
+		Text:           true,
+		Media:          false,
+		BlockStreaming: false,
+	}
+}
+
+func (Channel) SettingsSchema() SettingsSchema {
+	return SettingsSchema{
+		Type:                 "object",
+		AdditionalProperties: false,
+		Required: []string{
+			"bot_token",
+			"signing_secret",
+		},
+		Properties: map[string]any{
+			"bot_token": map[string]any{
+				"type":        "string",
+				"title":       "Bot Token",
+				"description": "Bot user OAuth token from your Slack app (xoxb- prefix). Used for all Web API calls and auth.test validation.",
+				"secret":      true,
+			},
+			"signing_secret": map[string]any{
+				"type":        "string",
+				"title":       "Signing Secret",
+				"description": "Signing secret from your Slack app's Basic Information page. Used to verify HMAC-SHA256 signatures on inbound Events API webhook requests.",
+				"secret":      true,
+			},
+		},
+	}
+}
+
+// CheckHealth reports plugin-level readiness. The compatibility layer carries no
+// credential, so this is a static check: the connector is registered and ready.
+// Per-account credential health is verified by Connector.ValidateCredential.
+func (Channel) CheckHealth(context.Context) error {
+	return nil
+}

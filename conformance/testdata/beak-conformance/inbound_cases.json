@@ -1,0 +1,95 @@
+[
+  {
+    "name": "group_message",
+    "fixture": {
+      "name": "group_message",
+      "workspace_uuid": "ws-1",
+      "channel_uuid": "channel-1",
+      "account_uuid": "acct-1",
+      "platform": "slack",
+      "credential": {
+        "account_id": "T123:U_BOT",
+        "bot_id": "B_BOT",
+        "bot_user_id": "U_BOT",
+        "bot_token": "xoxb-test-token",
+        "signing_secret": "test-signing-secret"
+      },
+      "account_state": {
+        "team_id": "T123",
+        "bot_id": "B_BOT",
+        "bot_user_id": "U_BOT"
+      },
+      "raw": {
+        "type": "event_callback",
+        "team_id": "T123",
+        "api_app_id": "A123",
+        "event_id": "Ev123456",
+        "event": {
+          "type": "message",
+          "channel_type": "channel",
+          "channel": "C123",
+          "user": "U999",
+          "text": "hello team <@U_BOT>",
+          "ts": "1620000000.000100",
+          "client_msg_id": "cm-1"
+        }
+      }
+    },
+    "expect": {
+      "chat_type": "group",
+      "chat_id": "C123",
+      "sender_id": "U999",
+      "text": "hello team <@U_BOT>",
+      "mentioned_me": true,
+      "require_dedupe_key": true,
+      "require_message_id": true
+    }
+  },
+  {
+    "name": "mention_all_channel",
+    "fixture": {
+      "name": "mention_all_channel",
+      "workspace_uuid": "ws-1",
+      "channel_uuid": "channel-1",
+      "account_uuid": "acct-1",
+      "platform": "slack",
+      "credential": {
+        "account_id": "T123:U_BOT",
+        "bot_id": "B_BOT",
+        "bot_user_id": "U_BOT",
+        "bot_token": "xoxb-test-token",
+        "signing_secret": "test-signing-secret"
+      },
+      "account_state": {
+        "team_id": "T123",
+        "bot_id": "B_BOT",
+        "bot_user_id": "U_BOT"
+      },
+      "raw": {
+        "type": "event_callback",
+        "team_id": "T123",
+        "api_app_id": "A123",
+        "event_id": "Ev123457",
+        "event": {
+          "type": "message",
+          "channel_type": "channel",
+          "channel": "C123",
+          "user": "U999",
+          "text": "<!channel> heads up team",
+          "ts": "1620000002.000100",
+          "client_msg_id": "cm-2"
+        }
+      }
+    },
+    "expect": {
+      "chat_type": "group",
+      "chat_id": "C123",
+      "sender_id": "U999",
+      "text": "<!channel> heads up team",
+      "mentioned_me": false,
+      "mention_all": true,
+      "require_dedupe_key": true,
+      "require_message_id": true
+    }
+  }
+]
