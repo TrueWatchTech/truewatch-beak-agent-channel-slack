@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/TrueWatch/beak-agent-channel-slack/sdk"
+	"github.com/TrueWatchTech/truewatch-beak-agent-channel-slack/sdk"
 )
 
 const (
@@ -68,6 +68,25 @@ func (g *fakeSDKGateway) messageCount() int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return len(g.messages)
+}
+
+type blockingSDKGateway struct {
+	*fakeSDKGateway
+	started chan struct{}
+	release chan struct{}
+}
+
+func (g *blockingSDKGateway) EnsureChatSession(ctx context.Context, req sdk.EnsureChatSessionRequest) (string, error) {
+	select {
+	case g.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	return g.fakeSDKGateway.EnsureChatSession(ctx, req)
 }
 
 // fakeSDKAccountStore is an in-memory AccountStore.
@@ -154,6 +173,7 @@ func makeRuntime(gw sdk.Gateway, store sdk.AccountStore, accounts ...sdk.Channel
 		Channel:       sdk.Channel{UUID: "channel-1", Platform: Platform},
 		Gateway:       gw,
 		AccountStore:  store,
+		HTTPClient:    httpClientReturning(map[string]any{"ok": false, "error": "not_found"}),
 	}
 	if len(accounts) > 0 {
 		rt.Account = accounts[0]
@@ -171,6 +191,8 @@ type slackInnerEvent struct {
 	User        string
 	Text        string
 	TS          string
+	EventTS     string
+	ThreadTS    string
 	ClientMsgID string
 	BotID       string
 	AppID       string
@@ -196,6 +218,12 @@ func slackEventBody(teamID string, ev slackInnerEvent) []byte {
 	}
 	if ev.TS != "" {
 		inner["ts"] = ev.TS
+	}
+	if ev.EventTS != "" {
+		inner["event_ts"] = ev.EventTS
+	}
+	if ev.ThreadTS != "" {
+		inner["thread_ts"] = ev.ThreadTS
 	}
 	if ev.ClientMsgID != "" {
 		inner["client_msg_id"] = ev.ClientMsgID

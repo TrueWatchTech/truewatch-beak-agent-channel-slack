@@ -1,0 +1,39 @@
+[
+  {
+    "name": "reaction_ack",
+    "request": {
+      "workspace_uuid": "ws-1",
+      "channel_uuid": "channel-1",
+      "account_uuid": "acct-1",
+      "platform": "slack",
+      "chat_type": "group",
+      "chat_id": "C123",
+      "target_message_id": "1620000000.000100",
+      "action": "start",
+      "mode": "reaction",
+      "emoji": "eyes"
+    },
+    "expect": {
+      "status": "sent",
+      "mode": "reaction",
+      "reaction_id": "C123:1620000000.000100:eyes"
+    }
+  },
+  {
+    "name": "reaction_missing_target_skips",
+    "request": {
+      "workspace_uuid": "ws-1",
+      "channel_uuid": "channel-1",
+      "account_uuid": "acct-1",
+      "platform": "slack",
+      "chat_type": "group",
+      "chat_id": "C123",
+      "action": "start",
+      "mode": "reaction"
+    },
+    "expect": {
+      "status": "skipped",
+      "mode": "reaction"
+    }
+  }
+]

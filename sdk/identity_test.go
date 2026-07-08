@@ -28,9 +28,10 @@ func TestIdentityHelpers(t *testing.T) {
 
 func TestOutboundMessageCommonFormatContract(t *testing.T) {
 	data, err := json.Marshal(OutboundMessage{
-		Text:   "# title\n- item",
-		Format: "markdown",
-		Title:  "title",
+		Text:     "# title\n- item",
+		Format:   "markdown",
+		Title:    "title",
+		ThreadID: "thread-1",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +40,31 @@ func TestOutboundMessageCommonFormatContract(t *testing.T) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded["text"] != "# title\n- item" || decoded["format"] != "markdown" || decoded["title"] != "title" {
+	if decoded["text"] != "# title\n- item" || decoded["format"] != "markdown" || decoded["title"] != "title" || decoded["thread_id"] != "thread-1" {
 		t.Fatalf("common outbound json=%+v", decoded)
+	}
+}
+
+func TestOutboundAckCommonContract(t *testing.T) {
+	data, err := json.Marshal(OutboundAck{
+		Platform:        "slack",
+		AccountUUID:     "acct-1",
+		ChatType:        ChatTypeGroup,
+		ChatID:          "C1",
+		TargetMessageID: "123.456",
+		Intent:          "processing",
+		Action:          "start",
+		Mode:            "reaction",
+		Emoji:           "eyes",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["target_message_id"] != "123.456" || decoded["mode"] != "reaction" || decoded["emoji"] != "eyes" {
+		t.Fatalf("common ack json=%+v", decoded)
 	}
 }

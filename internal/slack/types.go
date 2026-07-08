@@ -13,6 +13,25 @@ type BotInfo struct {
 	BotName     string
 }
 
+type ChannelInfo struct {
+	ID        string
+	Name      string
+	IsChannel bool
+	IsGroup   bool
+	IsIM      bool
+	IsMPIM    bool
+	User      string
+}
+
+type UserInfo struct {
+	ID          string
+	TeamID      string
+	Name        string
+	RealName    string
+	DisplayName string
+	AvatarURL   string
+}
+
 // authTestResponse models the Slack auth.test response. On an invalid token
 // Slack returns HTTP 200 with OK=false and a populated Error field.
 type authTestResponse struct {
@@ -31,6 +50,48 @@ type postMessageResponse struct {
 	Error   string `json:"error,omitempty"`
 	Channel string `json:"channel"`
 	TS      string `json:"ts"`
+}
+
+type conversationInfoResponse struct {
+	OK      bool   `json:"ok"`
+	Error   string `json:"error,omitempty"`
+	Channel struct {
+		ID             string `json:"id"`
+		Name           string `json:"name"`
+		NameNormalized string `json:"name_normalized"`
+		IsChannel      bool   `json:"is_channel"`
+		IsGroup        bool   `json:"is_group"`
+		IsIM           bool   `json:"is_im"`
+		IsMPIM         bool   `json:"is_mpim"`
+		User           string `json:"user"`
+	} `json:"channel"`
+}
+
+type userInfoResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+	User  struct {
+		ID       string `json:"id"`
+		TeamID   string `json:"team_id"`
+		Name     string `json:"name"`
+		RealName string `json:"real_name"`
+		Profile  struct {
+			RealName              string `json:"real_name"`
+			DisplayName           string `json:"display_name"`
+			RealNameNormalized    string `json:"real_name_normalized"`
+			DisplayNameNormalized string `json:"display_name_normalized"`
+			ImageOriginal         string `json:"image_original"`
+			Image512              string `json:"image_512"`
+			Image192              string `json:"image_192"`
+			Image72               string `json:"image_72"`
+			Image48               string `json:"image_48"`
+		} `json:"profile"`
+	} `json:"user"`
+}
+
+type addReactionResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
 }
 
 // EventEnvelope is the outer Slack Events API payload. Event carries the inner
@@ -56,6 +117,7 @@ type InnerEvent struct {
 	User        string `json:"user,omitempty"`
 	Text        string `json:"text,omitempty"`
 	TS          string `json:"ts,omitempty"`
+	EventTS     string `json:"event_ts,omitempty"`
 	ThreadTS    string `json:"thread_ts,omitempty"`
 	ClientMsgID string `json:"client_msg_id,omitempty"`
 	BotID       string `json:"bot_id,omitempty"`

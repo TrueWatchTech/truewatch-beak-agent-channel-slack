@@ -7,13 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
-	platform "github.com/TrueWatch/beak-agent-channel-slack/internal/slack"
-	"github.com/TrueWatch/beak-agent-channel-slack/sdk"
-	"github.com/TrueWatch/beak-agent-channel-slack/state"
+	platform "github.com/TrueWatchTech/truewatch-beak-agent-channel-slack/internal/slack"
+	"github.com/TrueWatchTech/truewatch-beak-agent-channel-slack/sdk"
+	"github.com/TrueWatchTech/truewatch-beak-agent-channel-slack/state"
 )
 
 const (
@@ -56,6 +57,7 @@ func (Connector) Metadata() sdk.ConnectorMetadata {
 			Stream:         false,
 			Webhook:        true,
 			BlockStreaming: false,
+			AckModes:       []string{"reaction"},
 		},
 	}
 }
@@ -124,7 +126,14 @@ func (Connector) ValidateCredential(ctx context.Context, req sdk.CredentialValid
 	// self-echo detection still reads) so generic conformance/host tooling can
 	// find the bot's identity at a single well-known path.
 	if id := firstString(info.BotUserID, info.BotID, info.AccountID); id != "" {
-		stateMap["bot_identity"] = map[string]any{"id": id}
+		stateMap["bot_identity"] = map[string]any{
+			"id":           id,
+			"id_type":      slackBotIdentityType(id, info),
+			"display_name": firstString(info.BotName, info.DisplayName),
+		}
+	}
+	if identities := slackBotIdentities(info); len(identities) > 0 {
+		stateMap["bot_identities"] = identities
 	}
 	return &sdk.CredentialValidationResult{
 		Valid:       true,
@@ -216,7 +225,7 @@ func (Connector) Send(ctx context.Context, runtime sdk.Runtime, req sdk.Outbound
 
 	client := platform.NewClient("", credentialStrings(account.Credential))
 	client.HTTPClient = runtime.HTTPClient
-	messageID, err := client.SendText(ctx, req.ChatID, req.Text, req.Format, req.Mentions, req.MentionAll)
+	messageID, err := client.SendText(ctx, req.ChatID, slackOutboundThreadTS(req), req.Text, req.Format, req.Mentions, req.MentionAll)
 	if err != nil {
 		return nil, err
 	}
@@ -228,6 +237,54 @@ func (Connector) Send(ctx context.Context, runtime sdk.Runtime, req sdk.Outbound
 		AccountUUID: accountUUID,
 		MessageID:   messageID,
 	}, nil
+}
+
+func (Connector) Acknowledge(ctx context.Context, runtime sdk.Runtime, req sdk.OutboundAck) (*sdk.AckResult, error) {
+	account, err := selectRuntimeAccount(runtime, req.AccountUUID)
+	if err != nil {
+		return nil, err
+	}
+	accountUUID := accountKey(account)
+	result := &sdk.AckResult{
+		Platform:    Platform,
+		AccountUUID: accountUUID,
+		Mode:        "reaction",
+		Status:      "skipped",
+	}
+	if mode := slackUnsupportedAckMode(req); mode != "" {
+		result.Mode = mode
+		result.Status = "unsupported"
+		result.Raw = map[string]any{"reason": "unsupported_ack_mode"}
+		return result, nil
+	}
+	if !slackAckWantsReaction(req) {
+		return result, nil
+	}
+	chatID := slackAckChatID(req)
+	if chatID == "" {
+		result.Raw = map[string]any{"reason": "missing_chat_id"}
+		return result, nil
+	}
+	messageID := slackAckTargetMessageID(req)
+	if messageID == "" {
+		result.Raw = map[string]any{"reason": "missing_target_message_id"}
+		return result, nil
+	}
+	emojiName := slackAckEmojiName(req)
+	client := platform.NewClient("", credentialStrings(account.Credential))
+	client.HTTPClient = runtime.HTTPClient
+	if err := client.AddReaction(ctx, chatID, messageID, emojiName); err != nil {
+		return nil, err
+	}
+	result.Status = "sent"
+	result.ReactionID = chatID + ":" + messageID + ":" + emojiName
+	result.Raw = map[string]any{
+		"channel":     chatID,
+		"message_ts":  messageID,
+		"emoji_name":  emojiName,
+		"reaction_id": result.ReactionID,
+	}
+	return result, nil
 }
 
 func (Connector) Stop(ctx context.Context, account sdk.ChannelAccount) error {
@@ -267,10 +324,14 @@ func (c Connector) HandleWebhookRequest(ctx context.Context, runtime sdk.Runtime
 		return nil, err
 	}
 
-	if _, err := c.HandleWebhook(ctx, runtime, account, body); err != nil {
-		return nil, err
-	}
-	// Slack only requires a 2xx within 3s; the body is ignored for events.
+	processCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	go func() {
+		defer cancel()
+		if _, err := c.HandleWebhook(processCtx, runtime, account, body); err != nil {
+			logRuntimeError(runtime, "slack webhook processing failed: %v", err)
+		}
+	}()
+	// Slack requires a 2xx within 3s; the body is ignored for events.
 	return &sdk.WebhookResponse{StatusCode: http.StatusOK}, nil
 }
 
@@ -351,11 +412,9 @@ func (c Connector) processMessageEvent(ctx context.Context, runtime sdk.Runtime,
 	// 4. Mention detection. <!channel> and <!here> are Slack's literal
 	// broadcast-mention tokens; they address the whole channel, not this bot,
 	// so they must never flip mentionedMe on their own.
-	mentionedMe := event.Type == "app_mention"
-	if !mentionedMe && botUserID != "" && strings.Contains(event.Text, "<@"+botUserID+">") {
-		mentionedMe = true
-	}
-	mentionAll := strings.Contains(event.Text, "<!channel>") || strings.Contains(event.Text, "<!here>")
+	mentions := slackMentions(event.Text)
+	mentionedMe := event.Type == "app_mention" || slackMentionsContain(mentions, botUserID) || slackMentionsContain(mentions, botID)
+	mentionAll := slackTextHasBroadcastMention(event.Text)
 
 	// 5. Text-only filter (skip non-text / incomplete events).
 	if chatType == "" || chatID == "" || senderID == "" || text == "" {
@@ -363,32 +422,43 @@ func (c Connector) processMessageEvent(ctx context.Context, runtime sdk.Runtime,
 	}
 
 	// 6. Dedupe.
-	messageID := firstString(event.ClientMsgID, envelope.EventID, event.TS)
-	dedupeKey := accountUUID + ":message:" + messageID
+	messageID := firstString(event.TS, event.ClientMsgID, event.EventTS, envelope.EventID)
+	dedupeKey := accountUUID + ":message:" + chatID + ":" + messageID
 	stateKey := Platform + ":" + chatType + ":" + chatID
 	if _, ok := st.InboundSeen[dedupeKey]; ok {
 		return &EventResult{Type: event.Type, Ignored: true, Reason: "duplicate", SessionUUID: st.PeerSessions[stateKey]}, nil
 	}
 
+	chatDisplayName, chatAvatarURL, chatIdentity, senderDisplayName := slackInboundDisplayFields(ctx, runtime, account, chatType, chatID, senderID)
+
 	inbound := sdk.InboundMessage{
-		WorkspaceUUID: runtime.WorkspaceUUID,
-		Platform:      Platform,
-		AccountUUID:   accountUUID,
-		ChannelUUID:   runtime.Channel.UUID,
-		ChatType:      chatType,
-		ChatID:        chatID,
-		ThreadID:      event.ThreadTS,
-		SenderID:      senderID,
-		MessageID:     event.TS,
-		Text:          text,
-		DedupeKey:     dedupeKey,
-		MentionedMe:   mentionedMe,
-		MentionAll:    mentionAll,
+		WorkspaceUUID:     runtime.WorkspaceUUID,
+		Platform:          Platform,
+		AccountUUID:       accountUUID,
+		ChannelUUID:       runtime.Channel.UUID,
+		ChatType:          chatType,
+		ChatID:            chatID,
+		ThreadID:          event.ThreadTS,
+		ChatDisplayName:   chatDisplayName,
+		ChatAvatarURL:     chatAvatarURL,
+		ChatIdentity:      chatIdentity,
+		SenderID:          senderID,
+		SenderDisplayName: senderDisplayName,
+		MessageID:         event.TS,
+		Text:              text,
+		DedupeKey:         dedupeKey,
+		Mentions:          mentions,
+		MentionedMe:       mentionedMe,
+		MentionAll:        mentionAll,
 		Raw: map[string]any{
-			"event_id": envelope.EventID,
-			"channel":  chatID,
-			"ts":       event.TS,
-			"user":     senderID,
+			"event_id":   envelope.EventID,
+			"event_ts":   event.EventTS,
+			"channel":    chatID,
+			"thread_ts":  event.ThreadTS,
+			"ts":         event.TS,
+			"user":       senderID,
+			"subtype":    event.Subtype,
+			"api_app_id": envelope.APIAppID,
 		},
 	}
 
@@ -400,9 +470,18 @@ func (c Connector) processMessageEvent(ctx context.Context, runtime sdk.Runtime,
 		AccountUUID:         accountUUID,
 		ChatType:            chatType,
 		ChatID:              chatID,
+		ThreadID:            inbound.ThreadID,
+		ChatDisplayName:     inbound.ChatDisplayName,
+		ChatAvatarURL:       inbound.ChatAvatarURL,
+		ChatIdentity:        inbound.ChatIdentity,
 		SenderID:            senderID,
 		AgentParticipantID:  runtime.Gateway.AgentParticipantID(),
 		BridgeParticipantID: runtime.Gateway.BridgeParticipantID(Platform),
+		Metadata: map[string]any{
+			"slack_chat_type": chatType,
+			"slack_chat_id":   chatID,
+			"slack_thread_ts": event.ThreadTS,
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -531,6 +610,164 @@ func (s *connectorStateStore) SaveAccount(ctx context.Context, account *state.Ac
 	return nil
 }
 
+var slackUserMentionPattern = regexp.MustCompile(`<@([^>|]+)(?:\|([^>]+))?>`)
+
+func slackBotIdentityType(id string, info *platform.BotInfo) string {
+	switch strings.TrimSpace(id) {
+	case strings.TrimSpace(info.BotUserID):
+		return "user_id"
+	case strings.TrimSpace(info.BotID):
+		return "bot_id"
+	default:
+		return "account_id"
+	}
+}
+
+func slackBotIdentities(info *platform.BotInfo) []map[string]any {
+	if info == nil {
+		return nil
+	}
+	displayName := firstString(info.BotName, info.DisplayName)
+	var identities []map[string]any
+	add := func(id, idType string) {
+		if strings.TrimSpace(id) == "" {
+			return
+		}
+		item := map[string]any{
+			"id":      strings.TrimSpace(id),
+			"id_type": idType,
+		}
+		if displayName != "" {
+			item["display_name"] = displayName
+		}
+		identities = append(identities, item)
+	}
+	add(info.BotUserID, "user_id")
+	add(info.BotID, "bot_id")
+	return identities
+}
+
+func slackMentions(text string) []sdk.MentionIdentity {
+	matches := slackUserMentionPattern.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	mentions := make([]sdk.MentionIdentity, 0, len(matches))
+	for _, match := range matches {
+		id := strings.TrimSpace(match[1])
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		displayName := ""
+		if len(match) > 2 {
+			displayName = strings.TrimSpace(match[2])
+		}
+		mentions = append(mentions, sdk.MentionIdentity{
+			ID:          id,
+			IDType:      "user_id",
+			DisplayName: displayName,
+		})
+	}
+	return mentions
+}
+
+func slackMentionsContain(mentions []sdk.MentionIdentity, id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	for _, mention := range mentions {
+		if strings.TrimSpace(mention.ID) == id {
+			return true
+		}
+	}
+	return false
+}
+
+func slackTextHasBroadcastMention(text string) bool {
+	return strings.Contains(text, "<!channel>") ||
+		strings.Contains(text, "<!here>") ||
+		strings.Contains(text, "<!everyone>")
+}
+
+func slackInboundDisplayFields(ctx context.Context, runtime sdk.Runtime, account sdk.ChannelAccount, chatType, chatID, senderID string) (string, string, sdk.ChatIdentity, string) {
+	chatIdentity := sdk.ChatIdentity{
+		ID:     chatID,
+		IDType: "channel_id",
+		Type:   chatType,
+	}
+	client := platform.NewClient("", credentialStrings(account.Credential))
+	client.HTTPClient = runtime.HTTPClient
+	client.RequestTimeout = 2 * time.Second
+
+	var senderDisplayName string
+	var senderAvatarURL string
+	if sender, err := client.UserInfo(ctx, senderID); err == nil && sender != nil {
+		senderDisplayName = firstString(sender.DisplayName, sender.RealName, sender.Name, sender.ID)
+		senderAvatarURL = sender.AvatarURL
+	}
+
+	if chatType == sdk.ChatTypeDirect {
+		chatDisplayName := senderDisplayName
+		chatAvatarURL := senderAvatarURL
+		chatIdentity.DisplayName = chatDisplayName
+		chatIdentity.AvatarURL = chatAvatarURL
+		return chatDisplayName, chatAvatarURL, chatIdentity, senderDisplayName
+	}
+
+	chatDisplayName := ""
+	if channel, err := client.ConversationInfo(ctx, chatID); err == nil && channel != nil {
+		chatDisplayName = firstString(channel.Name, channel.ID)
+		chatIdentity.DisplayName = chatDisplayName
+	}
+	return chatDisplayName, "", chatIdentity, senderDisplayName
+}
+
+func slackAckWantsReaction(req sdk.OutboundAck) bool {
+	action := strings.ToLower(strings.TrimSpace(firstString(req.Action, req.Raw["action"])))
+	return action == "" || action == "start" || action == "processing"
+}
+
+func slackUnsupportedAckMode(req sdk.OutboundAck) string {
+	mode := strings.ToLower(strings.TrimSpace(firstString(req.Mode, req.Raw["mode"])))
+	if mode == "" || mode == "auto" || mode == "reaction" {
+		return ""
+	}
+	return mode
+}
+
+func slackAckChatID(req sdk.OutboundAck) string {
+	return firstString(req.ChatID, req.Raw["chat_id"], req.Raw["channel"], req.Raw["slack_channel_id"])
+}
+
+func slackAckTargetMessageID(req sdk.OutboundAck) string {
+	return firstString(req.TargetMessageID, req.Raw["target_message_id"], req.Raw["message_id"], req.Raw["slack_message_ts"], req.Raw["ts"])
+}
+
+func slackOutboundThreadTS(req sdk.OutboundMessage) string {
+	return firstString(req.ThreadID, req.Raw["thread_ts"], req.Raw["thread_id"], req.Raw["slack_thread_ts"])
+}
+
+func slackAckEmojiName(req sdk.OutboundAck) string {
+	value := strings.Trim(strings.TrimSpace(firstString(req.Emoji, req.Raw["emoji"], req.Raw["emoji_name"])), ":")
+	switch strings.ToLower(value) {
+	case "", "eyes", "processing":
+		return "eyes"
+	case "thinking", "think":
+		return "thinking_face"
+	case "typing":
+		return "keyboard"
+	case "ok", "done", "check", "checkmark", "check_mark":
+		return "white_check_mark"
+	case "wait", "one_second", "one-second", "onesecond":
+		return "hourglass_flowing_sand"
+	default:
+		return value
+	}
+}
+
 func runtimeAccountCandidates(runtime sdk.Runtime) []sdk.ChannelAccount {
 	seen := make(map[string]bool)
 	var out []sdk.ChannelAccount
@@ -614,4 +851,10 @@ func firstString(values ...any) string {
 		}
 	}
 	return ""
+}
+
+func logRuntimeError(runtime sdk.Runtime, format string, args ...any) {
+	if runtime.Logger != nil {
+		runtime.Logger.Printf(format, args...)
+	}
 }

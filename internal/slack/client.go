@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/TrueWatch/beak-agent-channel-slack/sdk"
+	"github.com/TrueWatchTech/truewatch-beak-agent-channel-slack/sdk"
 )
 
 // DefaultBaseURL is the Slack API base. Override via NewClient for private
@@ -85,9 +85,8 @@ func (c *Client) Validate(ctx context.Context) (*BotInfo, error) {
 }
 
 // SendText sends a message via Slack chat.postMessage and returns the message
-// ts (Slack's per-channel message id). markdown is delivered as mrkdwn;
-// mentionAll prepends <!channel>.
-func (c *Client) SendText(ctx context.Context, chatID, text, format string, mentions []sdk.MentionIdentity, mentionAll bool) (string, error) {
+// ts (Slack's per-channel message id). Markdown is delivered as Slack mrkdwn.
+func (c *Client) SendText(ctx context.Context, chatID, threadTS, text, format string, mentions []sdk.MentionIdentity, mentionAll bool) (string, error) {
 	token := strings.TrimSpace(c.Credential["bot_token"])
 	if token == "" {
 		return "", fmt.Errorf("slack bot_token is required")
@@ -95,7 +94,7 @@ func (c *Client) SendText(ctx context.Context, chatID, text, format string, ment
 	if strings.TrimSpace(chatID) == "" {
 		return "", fmt.Errorf("slack chat_id is required")
 	}
-	body := text
+	body := slackMentionPrefix(mentions, text)
 	if mentionAll {
 		body = "<!channel> " + body
 	}
@@ -104,8 +103,10 @@ func (c *Client) SendText(ctx context.Context, chatID, text, format string, ment
 		"text":    body,
 		"mrkdwn":  true,
 	}
+	if threadTS = strings.TrimSpace(threadTS); threadTS != "" {
+		payload["thread_ts"] = threadTS
+	}
 	_ = format
-	_ = mentions
 	var resp postMessageResponse
 	if err := c.doJSON(ctx, http.MethodPost, "chat.postMessage", nil, payload, &resp, withBearer(token)); err != nil {
 		return "", err
@@ -120,6 +121,101 @@ func (c *Client) SendText(ctx context.Context, chatID, text, format string, ment
 	return resp.TS, nil
 }
 
+func (c *Client) ConversationInfo(ctx context.Context, channelID string) (*ChannelInfo, error) {
+	token := strings.TrimSpace(c.Credential["bot_token"])
+	if token == "" {
+		return nil, fmt.Errorf("slack bot_token is required")
+	}
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return nil, fmt.Errorf("slack channel_id is required")
+	}
+	var resp conversationInfoResponse
+	if err := c.doJSON(ctx, http.MethodGet, "conversations.info", map[string]string{"channel": channelID}, nil, &resp, withBearer(token)); err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, slackAPIError("conversations.info", resp.Error)
+	}
+	info := &ChannelInfo{
+		ID:        firstNonEmpty(resp.Channel.ID, channelID),
+		Name:      firstNonEmpty(resp.Channel.NameNormalized, resp.Channel.Name),
+		IsChannel: resp.Channel.IsChannel,
+		IsGroup:   resp.Channel.IsGroup,
+		IsIM:      resp.Channel.IsIM,
+		IsMPIM:    resp.Channel.IsMPIM,
+		User:      resp.Channel.User,
+	}
+	return info, nil
+}
+
+func (c *Client) UserInfo(ctx context.Context, userID string) (*UserInfo, error) {
+	token := strings.TrimSpace(c.Credential["bot_token"])
+	if token == "" {
+		return nil, fmt.Errorf("slack bot_token is required")
+	}
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, fmt.Errorf("slack user_id is required")
+	}
+	var resp userInfoResponse
+	if err := c.doJSON(ctx, http.MethodGet, "users.info", map[string]string{"user": userID}, nil, &resp, withBearer(token)); err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, slackAPIError("users.info", resp.Error)
+	}
+	return &UserInfo{
+		ID:          firstNonEmpty(resp.User.ID, userID),
+		TeamID:      resp.User.TeamID,
+		Name:        resp.User.Name,
+		RealName:    firstNonEmpty(resp.User.Profile.RealNameNormalized, resp.User.Profile.RealName, resp.User.RealName),
+		DisplayName: firstNonEmpty(resp.User.Profile.DisplayNameNormalized, resp.User.Profile.DisplayName, resp.User.Name, resp.User.RealName),
+		AvatarURL: firstNonEmpty(
+			resp.User.Profile.Image512,
+			resp.User.Profile.Image192,
+			resp.User.Profile.Image72,
+			resp.User.Profile.Image48,
+			resp.User.Profile.ImageOriginal,
+		),
+	}, nil
+}
+
+func (c *Client) AddReaction(ctx context.Context, channelID, timestamp, name string) error {
+	token := strings.TrimSpace(c.Credential["bot_token"])
+	if token == "" {
+		return fmt.Errorf("slack bot_token is required")
+	}
+	channelID = strings.TrimSpace(channelID)
+	timestamp = strings.TrimSpace(timestamp)
+	name = strings.Trim(strings.TrimSpace(name), ":")
+	if channelID == "" {
+		return fmt.Errorf("slack channel_id is required")
+	}
+	if timestamp == "" {
+		return fmt.Errorf("slack message timestamp is required")
+	}
+	if name == "" {
+		return fmt.Errorf("slack reaction name is required")
+	}
+	payload := map[string]any{
+		"channel":   channelID,
+		"timestamp": timestamp,
+		"name":      name,
+	}
+	var resp addReactionResponse
+	if err := c.doJSON(ctx, http.MethodPost, "reactions.add", nil, payload, &resp, withBearer(token)); err != nil {
+		return err
+	}
+	if !resp.OK {
+		if resp.Error == "already_reacted" {
+			return nil
+		}
+		return slackAPIError("reactions.add", resp.Error)
+	}
+	return nil
+}
+
 // firstNonEmpty returns the first non-empty trimmed string.
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
@@ -128,6 +224,30 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func slackMentionPrefix(mentions []sdk.MentionIdentity, text string) string {
+	var parts []string
+	seen := make(map[string]bool)
+	for _, mention := range mentions {
+		id := strings.TrimSpace(mention.ID)
+		if id == "" || seen[id] || strings.Contains(text, "<@"+id+">") || strings.Contains(text, "<@"+id+"|") {
+			continue
+		}
+		seen[id] = true
+		parts = append(parts, "<@"+id+">")
+	}
+	if len(parts) == 0 {
+		return text
+	}
+	return strings.Join(parts, " ") + " " + text
+}
+
+func slackAPIError(method, errMsg string) error {
+	if errMsg == "" {
+		errMsg = "platform_error"
+	}
+	return fmt.Errorf("slack %s: %s", method, errMsg)
 }
 
 type requestOption func(*http.Request)

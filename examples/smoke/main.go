@@ -41,8 +41,8 @@ import (
 	"strings"
 	"sync"
 
-	beak "github.com/TrueWatch/beak-agent-channel-slack"
-	"github.com/TrueWatch/beak-agent-channel-slack/sdk"
+	beak "github.com/TrueWatchTech/truewatch-beak-agent-channel-slack"
+	"github.com/TrueWatchTech/truewatch-beak-agent-channel-slack/sdk"
 )
 
 // credentialFieldSpec mirrors one entry of platforms/slack.yaml's

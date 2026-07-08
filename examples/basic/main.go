@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	beak "github.com/TrueWatch/beak-agent-channel-slack"
+	beak "github.com/TrueWatchTech/truewatch-beak-agent-channel-slack"
 )
 
 func main() {

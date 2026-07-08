@@ -31,6 +31,7 @@
           "user": "U999",
           "text": "hello team <@U_BOT>",
           "ts": "1620000000.000100",
+          "thread_ts": "1620000000.000000",
           "client_msg_id": "cm-1"
         }
       }
@@ -38,9 +39,14 @@
     "expect": {
       "chat_type": "group",
       "chat_id": "C123",
+      "thread_id": "1620000000.000000",
+      "chat_display_name": "ops-alerts",
+      "chat_identity_id": "C123",
       "sender_id": "U999",
+      "sender_display_name": "Alice",
       "text": "hello team <@U_BOT>",
       "mentioned_me": true,
+      "mention_ids": ["U_BOT"],
       "require_dedupe_key": true,
       "require_message_id": true
     }

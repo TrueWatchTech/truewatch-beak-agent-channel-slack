@@ -1,6 +1,7 @@
 package slackconformance
 
 import (
+	"context"
 	"testing"
 
 	conformance "gitlab.jiagouyun.com/guance/beak-agent-channel-sdk/beak-channel-sdk-conformance"
@@ -14,7 +15,26 @@ func TestConformance(t *testing.T) {
 		CredentialSchemaProvider: a,
 		CredentialValidator:      a,
 		InboundParser:            a,
+		Acknowledger:             a,
 		CredentialCases:          conformance.MustLoadJSON[[]conformance.CredentialValidationCase](t, "testdata/beak-conformance/credential_cases.json"),
 		InboundCases:             conformance.MustLoadJSON[[]conformance.InboundCase](t, "testdata/beak-conformance/inbound_cases.json"),
+		AckCases:                 conformance.MustLoadJSON[[]conformance.AckCase](t, "testdata/beak-conformance/ack_cases.json"),
 	})
+}
+
+func TestSlackThreadIDConformanceCanary(t *testing.T) {
+	a := newAdapter()
+	cases := conformance.MustLoadJSON[[]conformance.InboundCase](t, "testdata/beak-conformance/inbound_cases.json")
+	var checked bool
+	for _, tc := range cases {
+		if tc.Expect.ThreadID == "" {
+			continue
+		}
+		checked = true
+		got, err := a.ParseInbound(context.Background(), tc.Fixture)
+		conformance.AssertInboundMessages(t, "slack", got, err, tc.Expect)
+	}
+	if !checked {
+		t.Fatal("expected at least one Slack inbound conformance case to assert thread_id")
+	}
 }

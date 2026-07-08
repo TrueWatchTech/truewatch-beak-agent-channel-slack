@@ -1,6 +1,6 @@
 # Slack Channel SDK
 
-`github.com/TrueWatch/beak-agent-channel-slack` connects Slack bot accounts to the Beak Channel Gateway. It
+`github.com/TrueWatchTech/truewatch-beak-agent-channel-slack` connects Slack bot accounts to the Beak Channel Gateway. It
 implements the common `sdk.Connector` interface plus a slack-specific
 inbound entry point.
 
@@ -11,7 +11,7 @@ inbound event parsing — is fully implemented. Use `NewConnector()` to obtain a
 ## Module
 
 ```
-github.com/TrueWatch/beak-agent-channel-slack
+github.com/TrueWatchTech/truewatch-beak-agent-channel-slack
 ```
 
 ## Usage
@@ -20,7 +20,7 @@ github.com/TrueWatch/beak-agent-channel-slack
 import (
     "fmt"
 
-    beak "github.com/TrueWatch/beak-agent-channel-slack"
+    beak "github.com/TrueWatchTech/truewatch-beak-agent-channel-slack"
 )
 
 func main() {
@@ -41,6 +41,16 @@ These are the fields surfaced in the Beak console form (`CredentialSchema`):
 Backend-only values (base URL, callback URL, offsets, token cache) are never
 exposed in the form.
 
+## Slack app scopes
+
+Recommended bot scopes:
+
+- `chat:write` for outbound messages.
+- `reactions:write` for `Acknowledge` reaction hints.
+- `users:read` for sender display names and avatars.
+- `channels:read`, `groups:read`, `im:read`, `mpim:read` for conversation display names.
+- `app_mentions:read`, `channels:history`, `groups:history`, `im:history`, `mpim:history` according to the Events API subscriptions enabled for the app.
+
 ## Event delivery
 
 Mode: **webhook**
@@ -48,6 +58,10 @@ Mode: **webhook**
 The Beak host owns the HTTP endpoint and forwards the raw request to
 `HandleWebhookRequest`, which verifies the signature and parses the event.
 
+Inbound messages expose standard Beak fields, including `thread_id`, `mentions`,
+`mentioned_me`, `mention_all`, `chat_identity`, `chat_display_name`, and
+`sender_display_name`. Slack display fields are best-effort: API lookup failures
+do not drop the inbound message.
 
 ## Webhook security
 
@@ -57,8 +71,14 @@ Strategy: **hmac_sha256**
 
 ## Outbound
 
-`Send` maps the common `OutboundMessage` (`Text`, `Format`, `Mentions`,
-`MentionAll`) onto the Slack send endpoint (`/api/chat.postMessage`).
+`Send` maps the common `OutboundMessage` (`Text`, `Format`, `ThreadID`,
+`Mentions`, `MentionAll`) onto the Slack send endpoint
+(`/api/chat.postMessage`). `ThreadID` is sent as Slack `thread_ts`; `Raw`
+`thread_ts` / `thread_id` are accepted as compatibility fallbacks.
+
+`Acknowledge` exposes `AckModes=["reaction"]` and maps processing hints to
+Slack `reactions.add`. Missing target message ids are skipped without failing
+the final Agent reply path; unsupported modes return `Status="unsupported"`.
 
 ## State
 

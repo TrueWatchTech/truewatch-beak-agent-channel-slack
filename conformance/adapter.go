@@ -5,13 +5,14 @@ package slackconformance
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
 
-	beakslack "github.com/TrueWatch/beak-agent-channel-slack"
-	"github.com/TrueWatch/beak-agent-channel-slack/sdk"
+	beakslack "github.com/TrueWatchTech/truewatch-beak-agent-channel-slack"
+	"github.com/TrueWatchTech/truewatch-beak-agent-channel-slack/sdk"
 	conformance "gitlab.jiagouyun.com/guance/beak-agent-channel-sdk/beak-channel-sdk-conformance"
 )
 
@@ -34,14 +35,16 @@ func (a *adapter) Metadata() conformance.ConnectorMetadata {
 		Label:       m.Label,
 		Description: m.Description,
 		Capabilities: conformance.Capabilities{
-			LoginModes:     m.Capabilities.LoginModes,
-			Text:           m.Capabilities.Text,
-			Media:          m.Capabilities.Media,
-			GroupChat:      m.Capabilities.GroupChat,
-			DirectChat:     m.Capabilities.DirectChat,
-			Stream:         m.Capabilities.Stream,
-			Webhook:        m.Capabilities.Webhook,
-			BlockStreaming: m.Capabilities.BlockStreaming,
+			LoginModes:       m.Capabilities.LoginModes,
+			Text:             m.Capabilities.Text,
+			Media:            m.Capabilities.Media,
+			GroupChat:        m.Capabilities.GroupChat,
+			DirectChat:       m.Capabilities.DirectChat,
+			Stream:           m.Capabilities.Stream,
+			Webhook:          m.Capabilities.Webhook,
+			BlockStreaming:   m.Capabilities.BlockStreaming,
+			AckModes:         m.Capabilities.AckModes,
+			RuntimeOwnership: m.Capabilities.RuntimeOwnership,
 		},
 	}
 }
@@ -110,6 +113,7 @@ func (a *adapter) ParseInbound(ctx context.Context, fixture conformance.InboundF
 		},
 		Gateway:      newFakeGateway(),
 		AccountStore: newFakeAccountStore(),
+		HTTPClient:   fakeSlackAPIClient(),
 	}
 
 	result, err := a.raw.HandleWebhook(ctx, runtime, account, fixture.Raw)
@@ -122,22 +126,80 @@ func (a *adapter) ParseInbound(ctx context.Context, fixture conformance.InboundF
 	in := result.Inbound
 	return []conformance.InboundMessage{
 		{
-			WorkspaceUUID: in.WorkspaceUUID,
-			Platform:      in.Platform,
-			AccountUUID:   in.AccountUUID,
-			ChannelUUID:   in.ChannelUUID,
-			ChatType:      in.ChatType,
-			ChatID:        in.ChatID,
-			ThreadID:      in.ThreadID,
-			SenderID:      in.SenderID,
-			MessageID:     in.MessageID,
-			Text:          in.Text,
-			DedupeKey:     in.DedupeKey,
-			Mentions:      convertMentions(in.Mentions),
-			MentionedMe:   in.MentionedMe,
-			MentionAll:    in.MentionAll,
-			Raw:           in.Raw,
+			WorkspaceUUID:   in.WorkspaceUUID,
+			Platform:        in.Platform,
+			AccountUUID:     in.AccountUUID,
+			ChannelUUID:     in.ChannelUUID,
+			ChatType:        in.ChatType,
+			ChatID:          in.ChatID,
+			ThreadID:        in.ThreadID,
+			ChatDisplayName: in.ChatDisplayName,
+			ChatAvatarURL:   in.ChatAvatarURL,
+			ChatIdentity: conformance.ChatIdentity{
+				ID:          in.ChatIdentity.ID,
+				IDType:      in.ChatIdentity.IDType,
+				Type:        in.ChatIdentity.Type,
+				DisplayName: in.ChatIdentity.DisplayName,
+				AvatarURL:   in.ChatIdentity.AvatarURL,
+			},
+			SenderID:          in.SenderID,
+			SenderDisplayName: in.SenderDisplayName,
+			MessageID:         in.MessageID,
+			Text:              in.Text,
+			DedupeKey:         in.DedupeKey,
+			Mentions:          convertMentions(in.Mentions),
+			MentionedMe:       in.MentionedMe,
+			MentionAll:        in.MentionAll,
+			Raw:               in.Raw,
 		}}, nil
+}
+
+func (a *adapter) Acknowledge(ctx context.Context, req conformance.OutboundAck) (*conformance.AckResult, error) {
+	result, err := a.conn.Acknowledge(ctx, sdk.Runtime{
+		HTTPClient: fakeSlackAPIClient(),
+		Account: sdk.ChannelAccount{
+			UUID:     req.AccountUUID,
+			Platform: "slack",
+			Credential: map[string]any{
+				"account_id":     "T123:U_BOT",
+				"bot_id":         "B_BOT",
+				"bot_user_id":    "U_BOT",
+				"bot_token":      "xoxb-test-token",
+				"signing_secret": "test-signing-secret",
+			},
+			State: map[string]any{
+				"team_id":     "T123",
+				"bot_id":      "B_BOT",
+				"bot_user_id": "U_BOT",
+			},
+		},
+	}, sdk.OutboundAck{
+		WorkspaceUUID:     req.WorkspaceUUID,
+		Platform:          req.Platform,
+		AccountUUID:       req.AccountUUID,
+		ChannelUUID:       req.ChannelUUID,
+		SessionUUID:       req.SessionUUID,
+		SourceMessageUUID: req.SourceMessageUUID,
+		ChatType:          req.ChatType,
+		ChatID:            req.ChatID,
+		TargetMessageID:   req.TargetMessageID,
+		Intent:            req.Intent,
+		Action:            req.Action,
+		Mode:              req.Mode,
+		Emoji:             req.Emoji,
+		Raw:               req.Raw,
+	})
+	if err != nil || result == nil {
+		return nil, err
+	}
+	return &conformance.AckResult{
+		Platform:    result.Platform,
+		AccountUUID: result.AccountUUID,
+		Mode:        result.Mode,
+		Status:      result.Status,
+		ReactionID:  result.ReactionID,
+		Raw:         result.Raw,
+	}, nil
 }
 
 func convertMentions(mentions []sdk.MentionIdentity) []conformance.MentionIdentity {
@@ -156,12 +218,47 @@ func convertMentions(mentions []sdk.MentionIdentity) []conformance.MentionIdenti
 func fakeAuthClient() *http.Client {
 	return &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		body := `{"ok":true,"team_id":"T123","user_id":"U_BOT","bot_id":"B_BOT","user":"testbot","team":"Test Team"}`
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(body)),
-		}, nil
+		return jsonResponse(body), nil
 	})}
+}
+
+func fakeSlackAPIClient() *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/auth.test":
+			return jsonResponse(`{"ok":true,"team_id":"T123","user_id":"U_BOT","bot_id":"B_BOT","user":"testbot","team":"Test Team"}`), nil
+		case "/api/users.info":
+			userID := req.URL.Query().Get("user")
+			if userID == "U999" {
+				return jsonResponse(`{"ok":true,"user":{"id":"U999","team_id":"T123","name":"alice","real_name":"Alice Zhang","profile":{"display_name":"Alice","real_name":"Alice Zhang","image_72":"https://example.com/alice.png"}}}`), nil
+			}
+			return jsonResponse(`{"ok":true,"user":{"id":"` + userID + `","team_id":"T123","name":"member","profile":{"display_name":"member"}}}`), nil
+		case "/api/conversations.info":
+			channelID := req.URL.Query().Get("channel")
+			return jsonResponse(`{"ok":true,"channel":{"id":"` + channelID + `","name":"ops-alerts","name_normalized":"ops-alerts","is_channel":true}}`), nil
+		case "/api/reactions.add":
+			var body struct {
+				Channel   string `json:"channel"`
+				Timestamp string `json:"timestamp"`
+				Name      string `json:"name"`
+			}
+			_ = json.NewDecoder(req.Body).Decode(&body)
+			if body.Channel == "" || body.Timestamp == "" || body.Name == "" {
+				return jsonResponse(`{"ok":false,"error":"invalid_arguments"}`), nil
+			}
+			return jsonResponse(`{"ok":true}`), nil
+		default:
+			return jsonResponse(`{"ok":false,"error":"unknown_method"}`), nil
+		}
+	})}
+}
+
+func jsonResponse(body string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TrueWatch/beak-agent-channel-slack/sdk"
+	"github.com/TrueWatchTech/truewatch-beak-agent-channel-slack/sdk"
 )
 
 func TestConnectorImplementsInterface(t *testing.T) {
@@ -28,6 +28,9 @@ func TestConnectorMetadata(t *testing.T) {
 	}
 	if !meta.Capabilities.Text {
 		t.Fatal("expected text capability")
+	}
+	if len(meta.Capabilities.AckModes) != 1 || meta.Capabilities.AckModes[0] != "reaction" {
+		t.Fatalf("ack modes=%+v", meta.Capabilities.AckModes)
 	}
 }
 
@@ -75,6 +78,12 @@ func TestValidateCredential_Success(t *testing.T) {
 	}
 	if res.State["team_id"] != testTeamID || res.State["bot_id"] != testBotID || res.State["bot_user_id"] != testBotUserID {
 		t.Fatalf("bot identity not persisted to state: %#v", res.State)
+	}
+	if identity, ok := res.State["bot_identity"].(map[string]any); !ok || identity["id"] != testBotUserID || identity["id_type"] != "user_id" {
+		t.Fatalf("standard bot_identity not persisted: %#v", res.State["bot_identity"])
+	}
+	if identities, ok := res.State["bot_identities"].([]map[string]any); !ok || len(identities) < 2 {
+		t.Fatalf("standard bot_identities not persisted: %#v", res.State["bot_identities"])
 	}
 }
 
@@ -155,6 +164,73 @@ func TestInbound_MentionMe(t *testing.T) {
 	res := inbound(t, slackInnerEvent{Type: "app_mention", ChannelType: "channel", Channel: "C1", User: "U_HUMAN", Text: "<@U_BOT> hello", TS: "1.3", ClientMsgID: "c"})
 	if res.Ignored || res.Inbound == nil || !res.Inbound.MentionedMe {
 		t.Fatalf("expected MentionedMe=true, got ignored=%v %#v", res.Ignored, res.Inbound)
+	}
+	if len(res.Inbound.Mentions) != 1 || res.Inbound.Mentions[0].ID != testBotUserID || res.Inbound.Mentions[0].IDType != "user_id" {
+		t.Fatalf("mentions=%+v", res.Inbound.Mentions)
+	}
+}
+
+func TestInbound_FillsThreadAndDisplayFields(t *testing.T) {
+	c := Connector{}
+	gw := &fakeSDKGateway{}
+	rt := makeRuntime(gw, newFakeSDKAccountStore())
+	rt.HTTPClient = &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/users.info":
+			return testJSONResponse(map[string]any{
+				"ok": true,
+				"user": map[string]any{
+					"id":        "U_HUMAN",
+					"team_id":   testTeamID,
+					"name":      "alice",
+					"real_name": "Alice Zhang",
+					"profile": map[string]any{
+						"display_name": "Alice",
+						"image_72":     "https://example.com/alice.png",
+					},
+				},
+			})
+		case "/api/conversations.info":
+			return testJSONResponse(map[string]any{
+				"ok": true,
+				"channel": map[string]any{
+					"id":              "C1",
+					"name":            "ops-alerts",
+					"name_normalized": "ops-alerts",
+					"is_channel":      true,
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s", req.URL.Path)
+		}
+		return nil, nil
+	})}
+	res, err := c.HandleWebhook(context.Background(), rt, sdkAccount("acct-1"), slackEventBody(testTeamID, slackInnerEvent{
+		Type:        "message",
+		ChannelType: "channel",
+		Channel:     "C1",
+		User:        "U_HUMAN",
+		Text:        "hello <@U_BOT>",
+		TS:          "1.31",
+		ThreadTS:    "1.30",
+		ClientMsgID: "display-1",
+	}))
+	if err != nil {
+		t.Fatalf("handle webhook: %v", err)
+	}
+	if res.Ignored {
+		t.Fatalf("unexpected ignore: %s", res.Reason)
+	}
+	if res.Inbound.ThreadID != "1.30" || res.Inbound.ChatDisplayName != "ops-alerts" || res.Inbound.SenderDisplayName != "Alice" {
+		t.Fatalf("inbound=%+v", res.Inbound)
+	}
+	if res.Inbound.ChatIdentity.ID != "C1" || res.Inbound.ChatIdentity.IDType != "channel_id" || res.Inbound.ChatIdentity.DisplayName != "ops-alerts" {
+		t.Fatalf("chat identity=%+v", res.Inbound.ChatIdentity)
+	}
+	gw.mu.Lock()
+	defer gw.mu.Unlock()
+	if len(gw.chatSessions) != 1 || gw.chatSessions[0].ThreadID != "1.30" || gw.chatSessions[0].ChatDisplayName != "ops-alerts" {
+		t.Fatalf("chat session reqs=%+v", gw.chatSessions)
 	}
 }
 
@@ -237,6 +313,50 @@ func TestSend_Text(t *testing.T) {
 	}
 }
 
+func TestSend_ThreadReply(t *testing.T) {
+	var sentText string
+	client := &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		data, _ := io.ReadAll(req.Body)
+		sentText = string(data)
+		return testJSONResponse(map[string]any{"ok": true, "ts": "111.222"})
+	})}
+	c := Connector{}
+	account := sdkAccount("acct-1")
+	rt := makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore(), account)
+	rt.HTTPClient = client
+	if _, err := c.Send(context.Background(), rt, sdk.OutboundMessage{AccountUUID: "acct-1", ChatID: "C1", ThreadID: "100.200", Text: "hi"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if !strings.Contains(sentText, `"thread_ts":"100.200"`) {
+		t.Fatalf("expected thread_ts in payload, got %q", sentText)
+	}
+}
+
+func TestSend_ThreadReplyFromRaw(t *testing.T) {
+	var sentText string
+	client := &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		data, _ := io.ReadAll(req.Body)
+		sentText = string(data)
+		return testJSONResponse(map[string]any{"ok": true, "ts": "111.222"})
+	})}
+	c := Connector{}
+	account := sdkAccount("acct-1")
+	rt := makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore(), account)
+	rt.HTTPClient = client
+	req := sdk.OutboundMessage{
+		AccountUUID: "acct-1",
+		ChatID:      "C1",
+		Text:        "hi",
+		Raw:         map[string]any{"thread_ts": "100.201"},
+	}
+	if _, err := c.Send(context.Background(), rt, req); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if !strings.Contains(sentText, `"thread_ts":"100.201"`) {
+		t.Fatalf("expected thread_ts in payload, got %q", sentText)
+	}
+}
+
 func TestSend_MentionAll(t *testing.T) {
 	var sentText string
 	client := &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -274,6 +394,79 @@ func TestSend_MissingAccount(t *testing.T) {
 	}
 }
 
+func TestAcknowledge_AddsReaction(t *testing.T) {
+	var sentPayload string
+	client := &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/api/reactions.add" {
+			t.Fatalf("unexpected request: %s", req.URL.Path)
+		}
+		data, _ := io.ReadAll(req.Body)
+		sentPayload = string(data)
+		return testJSONResponse(map[string]any{"ok": true})
+	})}
+	c := Connector{}
+	account := sdkAccount("acct-1")
+	rt := makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore(), account)
+	rt.HTTPClient = client
+	result, err := c.Acknowledge(context.Background(), rt, sdk.OutboundAck{
+		AccountUUID:     "acct-1",
+		ChatType:        sdk.ChatTypeGroup,
+		ChatID:          "C1",
+		TargetMessageID: "1.31",
+		Action:          "start",
+		Mode:            "reaction",
+		Emoji:           "thinking",
+	})
+	if err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	if result.Status != "sent" || result.Mode != "reaction" || result.ReactionID != "C1:1.31:thinking_face" {
+		t.Fatalf("result=%+v", result)
+	}
+	if !strings.Contains(sentPayload, `"channel":"C1"`) || !strings.Contains(sentPayload, `"timestamp":"1.31"`) || !strings.Contains(sentPayload, `"name":"thinking_face"`) {
+		t.Fatalf("payload=%s", sentPayload)
+	}
+}
+
+func TestAcknowledge_SkipsWithoutTargetMessageID(t *testing.T) {
+	c := Connector{}
+	account := sdkAccount("acct-1")
+	rt := makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore(), account)
+	result, err := c.Acknowledge(context.Background(), rt, sdk.OutboundAck{
+		AccountUUID: "acct-1",
+		ChatType:    sdk.ChatTypeGroup,
+		ChatID:      "C1",
+		Action:      "start",
+		Mode:        "reaction",
+	})
+	if err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	if result.Status != "skipped" || result.Raw["reason"] != "missing_target_message_id" {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestAcknowledge_UnsupportedMode(t *testing.T) {
+	c := Connector{}
+	account := sdkAccount("acct-1")
+	rt := makeRuntime(&fakeSDKGateway{}, newFakeSDKAccountStore(), account)
+	result, err := c.Acknowledge(context.Background(), rt, sdk.OutboundAck{
+		AccountUUID:     "acct-1",
+		ChatType:        sdk.ChatTypeGroup,
+		ChatID:          "C1",
+		TargetMessageID: "1.31",
+		Action:          "start",
+		Mode:            "typing",
+	})
+	if err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	if result.Status != "unsupported" || result.Mode != "typing" || result.Raw["reason"] != "unsupported_ack_mode" {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
 func TestWebhookSecurity_ValidSignature(t *testing.T) {
 	c := Connector{}
 	body := slackEventBody(testTeamID, slackInnerEvent{Type: "message", ChannelType: "channel", Channel: "C1", User: "U_HUMAN", Text: "hi", TS: "9.1", ClientMsgID: "w1"})
@@ -284,6 +477,47 @@ func TestWebhookSecurity_ValidSignature(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d", resp.StatusCode)
+	}
+}
+
+func TestWebhookSecurity_ValidSignatureReturnsBeforeProcessing(t *testing.T) {
+	c := Connector{}
+	body := slackEventBody(testTeamID, slackInnerEvent{Type: "message", ChannelType: "channel", Channel: "C1", User: "U_HUMAN", Text: "hi", TS: "9.4", ClientMsgID: "w4"})
+	req := signedSlackRequest(testSigningSecret, body, time.Now().UTC())
+	gw := &blockingSDKGateway{
+		fakeSDKGateway: &fakeSDKGateway{},
+		started:        make(chan struct{}, 1),
+		release:        make(chan struct{}),
+	}
+	defer close(gw.release)
+
+	type result struct {
+		resp *sdk.WebhookResponse
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		resp, err := c.HandleWebhookRequest(context.Background(), makeRuntime(gw, newFakeSDKAccountStore()), sdkAccount("acct-1"), req)
+		done <- result{resp: resp, err: err}
+	}()
+
+	var got result
+	select {
+	case got = <-done:
+	case <-gw.started:
+		select {
+		case got = <-done:
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("HandleWebhookRequest blocked on business processing before returning Slack 2xx")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("HandleWebhookRequest did not return promptly")
+	}
+	if got.err != nil {
+		t.Fatalf("valid signature rejected: %v", got.err)
+	}
+	if got.resp == nil || got.resp.StatusCode != http.StatusOK {
+		t.Fatalf("response=%+v", got.resp)
 	}
 }
 

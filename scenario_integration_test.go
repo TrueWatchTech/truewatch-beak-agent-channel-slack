@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/TrueWatch/beak-agent-channel-slack/sdk"
+	"github.com/TrueWatchTech/truewatch-beak-agent-channel-slack/sdk"
 )
 
 // TestScenario_DirectAndGroupDoNotShareSession: the same account receiving a
