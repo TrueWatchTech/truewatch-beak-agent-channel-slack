@@ -94,6 +94,24 @@ type addReactionResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
+type Message struct {
+	Type         string `json:"type"`
+	Subtype      string `json:"subtype,omitempty"`
+	User         string `json:"user,omitempty"`
+	Username     string `json:"username,omitempty"`
+	BotID        string `json:"bot_id,omitempty"`
+	Text         string `json:"text,omitempty"`
+	TS           string `json:"ts,omitempty"`
+	ThreadTS     string `json:"thread_ts,omitempty"`
+	ParentUserID string `json:"parent_user_id,omitempty"`
+}
+
+type conversationRepliesResponse struct {
+	OK       bool      `json:"ok"`
+	Error    string    `json:"error,omitempty"`
+	Messages []Message `json:"messages,omitempty"`
+}
+
 // EventEnvelope is the outer Slack Events API payload. Event carries the inner
 // event object, decoded separately so url_verification can be handled before
 // signature verification.
@@ -110,16 +128,17 @@ type EventEnvelope struct {
 
 // InnerEvent is the Slack inner event (message / app_mention).
 type InnerEvent struct {
-	Type        string `json:"type"`
-	Subtype     string `json:"subtype,omitempty"`
-	ChannelType string `json:"channel_type,omitempty"`
-	Channel     string `json:"channel,omitempty"`
-	User        string `json:"user,omitempty"`
-	Text        string `json:"text,omitempty"`
-	TS          string `json:"ts,omitempty"`
-	EventTS     string `json:"event_ts,omitempty"`
-	ThreadTS    string `json:"thread_ts,omitempty"`
-	ClientMsgID string `json:"client_msg_id,omitempty"`
-	BotID       string `json:"bot_id,omitempty"`
-	AppID       string `json:"app_id,omitempty"`
+	Type         string `json:"type"`
+	Subtype      string `json:"subtype,omitempty"`
+	ChannelType  string `json:"channel_type,omitempty"`
+	Channel      string `json:"channel,omitempty"`
+	User         string `json:"user,omitempty"`
+	Text         string `json:"text,omitempty"`
+	TS           string `json:"ts,omitempty"`
+	EventTS      string `json:"event_ts,omitempty"`
+	ThreadTS     string `json:"thread_ts,omitempty"`
+	ParentUserID string `json:"parent_user_id,omitempty"`
+	ClientMsgID  string `json:"client_msg_id,omitempty"`
+	BotID        string `json:"bot_id,omitempty"`
+	AppID        string `json:"app_id,omitempty"`
 }

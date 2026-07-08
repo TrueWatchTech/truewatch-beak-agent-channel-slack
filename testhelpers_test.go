@@ -184,18 +184,19 @@ func makeRuntime(gw sdk.Gateway, store sdk.AccountStore, accounts ...sdk.Channel
 
 // slackInnerEvent is a builder for the inner Slack event object.
 type slackInnerEvent struct {
-	Type        string
-	Subtype     string
-	ChannelType string
-	Channel     string
-	User        string
-	Text        string
-	TS          string
-	EventTS     string
-	ThreadTS    string
-	ClientMsgID string
-	BotID       string
-	AppID       string
+	Type         string
+	Subtype      string
+	ChannelType  string
+	Channel      string
+	User         string
+	Text         string
+	TS           string
+	EventTS      string
+	ThreadTS     string
+	ParentUserID string
+	ClientMsgID  string
+	BotID        string
+	AppID        string
 }
 
 // slackEventBody marshals an event_callback envelope wrapping ev.
@@ -224,6 +225,9 @@ func slackEventBody(teamID string, ev slackInnerEvent) []byte {
 	}
 	if ev.ThreadTS != "" {
 		inner["thread_ts"] = ev.ThreadTS
+	}
+	if ev.ParentUserID != "" {
+		inner["parent_user_id"] = ev.ParentUserID
 	}
 	if ev.ClientMsgID != "" {
 		inner["client_msg_id"] = ev.ClientMsgID

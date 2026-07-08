@@ -430,6 +430,7 @@ func (c Connector) processMessageEvent(ctx context.Context, runtime sdk.Runtime,
 	}
 
 	chatDisplayName, chatAvatarURL, chatIdentity, senderDisplayName := slackInboundDisplayFields(ctx, runtime, account, chatType, chatID, senderID)
+	referenced := slackReferencedMessage(ctx, runtime, account, event, chatType, chatID)
 
 	inbound := sdk.InboundMessage{
 		WorkspaceUUID:     runtime.WorkspaceUUID,
@@ -446,19 +447,21 @@ func (c Connector) processMessageEvent(ctx context.Context, runtime sdk.Runtime,
 		SenderDisplayName: senderDisplayName,
 		MessageID:         event.TS,
 		Text:              text,
+		ReferencedMessage: referenced,
 		DedupeKey:         dedupeKey,
 		Mentions:          mentions,
 		MentionedMe:       mentionedMe,
 		MentionAll:        mentionAll,
 		Raw: map[string]any{
-			"event_id":   envelope.EventID,
-			"event_ts":   event.EventTS,
-			"channel":    chatID,
-			"thread_ts":  event.ThreadTS,
-			"ts":         event.TS,
-			"user":       senderID,
-			"subtype":    event.Subtype,
-			"api_app_id": envelope.APIAppID,
+			"event_id":       envelope.EventID,
+			"event_ts":       event.EventTS,
+			"channel":        chatID,
+			"thread_ts":      event.ThreadTS,
+			"parent_user_id": event.ParentUserID,
+			"ts":             event.TS,
+			"user":           senderID,
+			"subtype":        event.Subtype,
+			"api_app_id":     envelope.APIAppID,
 		},
 	}
 
@@ -723,6 +726,63 @@ func slackInboundDisplayFields(ctx context.Context, runtime sdk.Runtime, account
 		chatIdentity.DisplayName = chatDisplayName
 	}
 	return chatDisplayName, "", chatIdentity, senderDisplayName
+}
+
+func slackReferencedMessage(ctx context.Context, runtime sdk.Runtime, account sdk.ChannelAccount, event *platform.InnerEvent, chatType, chatID string) *sdk.ReferencedMessage {
+	if event == nil {
+		return nil
+	}
+	threadTS := strings.TrimSpace(event.ThreadTS)
+	messageTS := strings.TrimSpace(event.TS)
+	if threadTS == "" || messageTS == "" || threadTS == messageTS {
+		return nil
+	}
+	ref := &sdk.ReferencedMessage{
+		Platform:    Platform,
+		MessageID:   threadTS,
+		ChatType:    chatType,
+		ChatID:      chatID,
+		ThreadID:    threadTS,
+		RootID:      threadTS,
+		SenderID:    strings.TrimSpace(event.ParentUserID),
+		MessageType: "text",
+		Raw: map[string]any{
+			"thread_ts":      threadTS,
+			"parent_user_id": strings.TrimSpace(event.ParentUserID),
+		},
+	}
+
+	client := platform.NewClient("", credentialStrings(account.Credential))
+	client.HTTPClient = runtime.HTTPClient
+	client.RequestTimeout = 2 * time.Second
+	parent, err := client.ThreadParent(ctx, chatID, threadTS)
+	if err != nil {
+		ref.Raw["fetch_error"] = err.Error()
+		return ref
+	}
+	if parent == nil {
+		return ref
+	}
+	ref.MessageID = firstString(parent.TS, ref.MessageID)
+	ref.ThreadID = firstString(parent.ThreadTS, ref.ThreadID)
+	ref.RootID = firstString(parent.ThreadTS, ref.RootID)
+	ref.SenderID = firstString(parent.User, parent.BotID, ref.SenderID)
+	ref.SenderDisplayName = strings.TrimSpace(parent.Username)
+	if subtype := strings.TrimSpace(parent.Subtype); subtype != "" {
+		ref.MessageType = subtype
+	}
+	ref.Text = strings.TrimSpace(parent.Text)
+	ref.CreatedAt = strings.TrimSpace(parent.TS)
+	ref.Raw["fetched"] = true
+	ref.Raw["bot_id"] = strings.TrimSpace(parent.BotID)
+	ref.Raw["subtype"] = strings.TrimSpace(parent.Subtype)
+
+	if ref.SenderDisplayName == "" && strings.TrimSpace(parent.User) != "" {
+		if sender, err := client.UserInfo(ctx, parent.User); err == nil && sender != nil {
+			ref.SenderDisplayName = firstString(sender.DisplayName, sender.RealName, sender.Name, sender.ID)
+		}
+	}
+	return ref
 }
 
 func slackAckWantsReaction(req sdk.OutboundAck) bool {

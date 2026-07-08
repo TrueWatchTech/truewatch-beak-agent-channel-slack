@@ -57,7 +57,9 @@ func main() {
 
 入站消息会输出 Beak 标准字段，包括 `thread_id`、`mentions`、`mentioned_me`、
 `mention_all`、`chat_identity`、`chat_display_name`、`sender_display_name`。
-Slack 展示信息是尽力获取：API 查询失败不会导致入站消息丢失。
+线程回复还会输出 `referenced_message`：当 `thread_ts` 与当前消息 `ts` 不同时，
+SDK 将 `thread_ts` 视为父消息 ID，并通过 `conversations.replies` 尽力拉取父消息。
+Slack 展示信息和父消息查询都是尽力获取：API 查询失败不会导致入站消息丢失。
 
 ## Webhook 验签
 

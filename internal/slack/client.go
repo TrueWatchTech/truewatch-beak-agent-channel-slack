@@ -181,6 +181,48 @@ func (c *Client) UserInfo(ctx context.Context, userID string) (*UserInfo, error)
 	}, nil
 }
 
+// ThreadParent returns the first message in a Slack thread. Slack models a
+// thread's parent message as the first item returned by conversations.replies
+// when called with channel + thread_ts.
+func (c *Client) ThreadParent(ctx context.Context, channelID, threadTS string) (*Message, error) {
+	token := strings.TrimSpace(c.Credential["bot_token"])
+	if token == "" {
+		return nil, fmt.Errorf("slack bot_token is required")
+	}
+	channelID = strings.TrimSpace(channelID)
+	threadTS = strings.TrimSpace(threadTS)
+	if channelID == "" {
+		return nil, fmt.Errorf("slack channel_id is required")
+	}
+	if threadTS == "" {
+		return nil, fmt.Errorf("slack thread_ts is required")
+	}
+	var resp conversationRepliesResponse
+	if err := c.doJSON(ctx, http.MethodGet, "conversations.replies", map[string]string{
+		"channel":   channelID,
+		"ts":        threadTS,
+		"oldest":    threadTS,
+		"inclusive": "true",
+		"limit":     "1",
+	}, nil, &resp, withBearer(token)); err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, slackAPIError("conversations.replies", resp.Error)
+	}
+	if len(resp.Messages) == 0 {
+		return nil, nil
+	}
+	msg := resp.Messages[0]
+	if strings.TrimSpace(msg.TS) == "" {
+		msg.TS = threadTS
+	}
+	if strings.TrimSpace(msg.ThreadTS) == "" {
+		msg.ThreadTS = threadTS
+	}
+	return &msg, nil
+}
+
 func (c *Client) AddReaction(ctx context.Context, channelID, timestamp, name string) error {
 	token := strings.TrimSpace(c.Credential["bot_token"])
 	if token == "" {

@@ -60,8 +60,11 @@ The Beak host owns the HTTP endpoint and forwards the raw request to
 
 Inbound messages expose standard Beak fields, including `thread_id`, `mentions`,
 `mentioned_me`, `mention_all`, `chat_identity`, `chat_display_name`, and
-`sender_display_name`. Slack display fields are best-effort: API lookup failures
-do not drop the inbound message.
+`sender_display_name`. Thread replies also expose `referenced_message`: when
+`thread_ts` differs from the current message `ts`, the SDK treats `thread_ts` as
+the parent message id and best-effort fetches it through
+`conversations.replies`. Slack display and parent-message lookups are
+best-effort: API lookup failures do not drop the inbound message.
 
 ## Webhook security
 

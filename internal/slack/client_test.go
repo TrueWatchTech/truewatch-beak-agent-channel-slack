@@ -150,6 +150,29 @@ func TestClientUserInfo(t *testing.T) {
 	}
 }
 
+func TestClientThreadParent(t *testing.T) {
+	httpClient := &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/api/conversations.replies" ||
+			req.URL.Query().Get("channel") != "C1" ||
+			req.URL.Query().Get("ts") != "111.222" ||
+			req.URL.Query().Get("oldest") != "111.222" ||
+			req.URL.Query().Get("inclusive") != "true" ||
+			req.URL.Query().Get("limit") != "1" {
+			t.Fatalf("unexpected request: %s %s", req.URL.Path, req.URL.RawQuery)
+		}
+		return jsonResp(`{"ok":true,"messages":[{"type":"message","user":"U1","text":"parent","thread_ts":"111.222","ts":"111.222"}]}`)
+	})}
+	client := NewClient("", map[string]string{"bot_token": "xoxb-test"})
+	client.HTTPClient = httpClient
+	msg, err := client.ThreadParent(context.Background(), "C1", "111.222")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg == nil || msg.TS != "111.222" || msg.User != "U1" || msg.Text != "parent" {
+		t.Fatalf("message=%+v", msg)
+	}
+}
+
 func TestClientAddReaction(t *testing.T) {
 	var body string
 	httpClient := &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {

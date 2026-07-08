@@ -32,6 +32,7 @@
           "text": "hello team <@U_BOT>",
           "ts": "1620000000.000100",
           "thread_ts": "1620000000.000000",
+          "parent_user_id": "U999",
           "client_msg_id": "cm-1"
         }
       }
@@ -47,6 +48,17 @@
       "text": "hello team <@U_BOT>",
       "mentioned_me": true,
       "mention_ids": ["U_BOT"],
+      "referenced_message": {
+        "platform": "slack",
+        "message_id": "1620000000.000000",
+        "chat_type": "group",
+        "chat_id": "C123",
+        "thread_id": "1620000000.000000",
+        "root_id": "1620000000.000000",
+        "sender_id": "U999",
+        "message_type": "text",
+        "text": "referenced parent"
+      },
       "require_dedupe_key": true,
       "require_message_id": true
     }

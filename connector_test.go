@@ -200,6 +200,19 @@ func TestInbound_FillsThreadAndDisplayFields(t *testing.T) {
 					"is_channel":      true,
 				},
 			})
+		case "/api/conversations.replies":
+			return testJSONResponse(map[string]any{
+				"ok": true,
+				"messages": []map[string]any{
+					{
+						"type":      "message",
+						"user":      "U_HUMAN",
+						"text":      "thread parent",
+						"ts":        "1.30",
+						"thread_ts": "1.30",
+					},
+				},
+			})
 		default:
 			t.Fatalf("unexpected request: %s", req.URL.Path)
 		}
@@ -231,6 +244,109 @@ func TestInbound_FillsThreadAndDisplayFields(t *testing.T) {
 	defer gw.mu.Unlock()
 	if len(gw.chatSessions) != 1 || gw.chatSessions[0].ThreadID != "1.30" || gw.chatSessions[0].ChatDisplayName != "ops-alerts" {
 		t.Fatalf("chat session reqs=%+v", gw.chatSessions)
+	}
+}
+
+func TestInbound_ThreadReplyReferencedMessage(t *testing.T) {
+	c := Connector{}
+	gw := &fakeSDKGateway{}
+	rt := makeRuntime(gw, newFakeSDKAccountStore())
+	var sawReplies bool
+	rt.HTTPClient = &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/users.info":
+			userID := req.URL.Query().Get("user")
+			if userID == "U_PARENT" {
+				return testJSONResponse(map[string]any{
+					"ok": true,
+					"user": map[string]any{
+						"id":      "U_PARENT",
+						"team_id": testTeamID,
+						"name":    "parent",
+						"profile": map[string]any{
+							"display_name": "Parent User",
+						},
+					},
+				})
+			}
+			return testJSONResponse(map[string]any{
+				"ok": true,
+				"user": map[string]any{
+					"id":      userID,
+					"team_id": testTeamID,
+					"name":    "replyer",
+					"profile": map[string]any{
+						"display_name": "Reply User",
+					},
+				},
+			})
+		case "/api/conversations.info":
+			return testJSONResponse(map[string]any{
+				"ok": true,
+				"channel": map[string]any{
+					"id":              "C1",
+					"name":            "ops-alerts",
+					"name_normalized": "ops-alerts",
+					"is_channel":      true,
+				},
+			})
+		case "/api/conversations.replies":
+			sawReplies = true
+			if req.URL.Query().Get("channel") != "C1" || req.URL.Query().Get("ts") != "100.000" {
+				t.Fatalf("unexpected replies query: %s", req.URL.RawQuery)
+			}
+			return testJSONResponse(map[string]any{
+				"ok": true,
+				"messages": []map[string]any{
+					{
+						"type":      "message",
+						"user":      "U_PARENT",
+						"text":      "quoted parent",
+						"ts":        "100.000",
+						"thread_ts": "100.000",
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s", req.URL.Path)
+		}
+		return nil, nil
+	})}
+	res, err := c.HandleWebhook(context.Background(), rt, sdkAccount("acct-1"), slackEventBody(testTeamID, slackInnerEvent{
+		Type:         "message",
+		ChannelType:  "channel",
+		Channel:      "C1",
+		User:         "U_HUMAN",
+		Text:         "reply text <@U_BOT>",
+		TS:           "101.000",
+		ThreadTS:     "100.000",
+		ParentUserID: "U_PARENT",
+		ClientMsgID:  "reply-1",
+	}))
+	if err != nil {
+		t.Fatalf("handle webhook: %v", err)
+	}
+	if !sawReplies {
+		t.Fatal("expected conversations.replies to be called")
+	}
+	if res.Ignored {
+		t.Fatalf("unexpected ignore: %s", res.Reason)
+	}
+	if res.Inbound == nil || res.Inbound.Text != "reply text <@U_BOT>" {
+		t.Fatalf("inbound text changed: %#v", res.Inbound)
+	}
+	ref := res.Inbound.ReferencedMessage
+	if ref == nil || ref.MessageID != "100.000" || ref.Text != "quoted parent" || ref.SenderID != "U_PARENT" || ref.SenderDisplayName != "Parent User" || ref.MessageType != "text" {
+		t.Fatalf("referenced message=%+v", ref)
+	}
+	gw.mu.Lock()
+	defer gw.mu.Unlock()
+	if len(gw.messages) != 1 {
+		t.Fatalf("messages=%+v", gw.messages)
+	}
+	metaInbound, ok := gw.messages[0].Metadata["inbound_message"].(sdk.InboundMessage)
+	if !ok || metaInbound.ReferencedMessage == nil || metaInbound.ReferencedMessage.Text != "quoted parent" {
+		t.Fatalf("metadata inbound=%#v", gw.messages[0].Metadata["inbound_message"])
 	}
 }
 

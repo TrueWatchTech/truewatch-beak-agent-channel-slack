@@ -146,12 +146,33 @@ func (a *adapter) ParseInbound(ctx context.Context, fixture conformance.InboundF
 			SenderDisplayName: in.SenderDisplayName,
 			MessageID:         in.MessageID,
 			Text:              in.Text,
+			ReferencedMessage: convertReferencedMessage(in.ReferencedMessage),
 			DedupeKey:         in.DedupeKey,
 			Mentions:          convertMentions(in.Mentions),
 			MentionedMe:       in.MentionedMe,
 			MentionAll:        in.MentionAll,
 			Raw:               in.Raw,
 		}}, nil
+}
+
+func convertReferencedMessage(ref *sdk.ReferencedMessage) *conformance.ReferencedMessage {
+	if ref == nil {
+		return nil
+	}
+	return &conformance.ReferencedMessage{
+		Platform:          ref.Platform,
+		MessageID:         ref.MessageID,
+		ChatType:          ref.ChatType,
+		ChatID:            ref.ChatID,
+		ThreadID:          ref.ThreadID,
+		RootID:            ref.RootID,
+		SenderID:          ref.SenderID,
+		SenderDisplayName: ref.SenderDisplayName,
+		MessageType:       ref.MessageType,
+		Text:              ref.Text,
+		CreatedAt:         ref.CreatedAt,
+		Raw:               ref.Raw,
+	}
 }
 
 func (a *adapter) Acknowledge(ctx context.Context, req conformance.OutboundAck) (*conformance.AckResult, error) {
@@ -236,6 +257,9 @@ func fakeSlackAPIClient() *http.Client {
 		case "/api/conversations.info":
 			channelID := req.URL.Query().Get("channel")
 			return jsonResponse(`{"ok":true,"channel":{"id":"` + channelID + `","name":"ops-alerts","name_normalized":"ops-alerts","is_channel":true}}`), nil
+		case "/api/conversations.replies":
+			threadTS := req.URL.Query().Get("ts")
+			return jsonResponse(`{"ok":true,"messages":[{"type":"message","user":"U999","text":"referenced parent","thread_ts":"` + threadTS + `","ts":"` + threadTS + `"}]}`), nil
 		case "/api/reactions.add":
 			var body struct {
 				Channel   string `json:"channel"`
