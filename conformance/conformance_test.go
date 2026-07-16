@@ -8,18 +8,7 @@ import (
 )
 
 func TestConformance(t *testing.T) {
-	a := newAdapter()
-	conformance.Run(t, conformance.Config{
-		Platform:                 "slack",
-		MetadataProvider:         a,
-		CredentialSchemaProvider: a,
-		CredentialValidator:      a,
-		InboundParser:            a,
-		Acknowledger:             a,
-		CredentialCases:          conformance.MustLoadJSON[[]conformance.CredentialValidationCase](t, "testdata/beak-conformance/credential_cases.json"),
-		InboundCases:             conformance.MustLoadJSON[[]conformance.InboundCase](t, "testdata/beak-conformance/inbound_cases.json"),
-		AckCases:                 conformance.MustLoadJSON[[]conformance.AckCase](t, "testdata/beak-conformance/ack_cases.json"),
-	})
+	Run(t)
 }
 
 func TestSlackThreadIDConformanceCanary(t *testing.T) {
