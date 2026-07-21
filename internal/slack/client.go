@@ -56,7 +56,7 @@ func NewClient(baseURL string, credential map[string]string) *Client {
 func (c *Client) Validate(ctx context.Context) (*BotInfo, error) {
 	token := strings.TrimSpace(c.Credential["bot_token"])
 	if token == "" {
-		return nil, fmt.Errorf("slack bot_token is required")
+		return nil, credentialRejected("slack bot_token is required")
 	}
 	var resp authTestResponse
 	// BaseURL already includes /api, so the path is the bare method name.
@@ -64,11 +64,17 @@ func (c *Client) Validate(ctx context.Context) (*BotInfo, error) {
 		return nil, err
 	}
 	if !resp.OK {
-		errMsg := resp.Error
-		if errMsg == "" {
-			errMsg = "invalid_auth"
+		errMsg := strings.TrimSpace(resp.Error)
+		if credentialResponseRejected(errMsg) {
+			return nil, credentialRejected("slack auth.test: " + errMsg)
 		}
-		return nil, fmt.Errorf("slack auth.test: %s", errMsg)
+		if errMsg == "" {
+			errMsg = "missing error code"
+		}
+		return nil, transientFailure("slack auth.test: " + errMsg)
+	}
+	if strings.TrimSpace(resp.TeamID) == "" || strings.TrimSpace(resp.UserID) == "" {
+		return nil, transientFailure("slack auth.test returned incomplete bot identity")
 	}
 	accountID := resp.TeamID
 	if resp.UserID != "" {
@@ -341,13 +347,13 @@ func (c *Client) doJSON(ctx context.Context, method, path string, query map[stri
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("%s %s failed: status=%d body=%s", method, path, resp.StatusCode, string(data))
+		return &HTTPError{StatusCode: resp.StatusCode, Method: method, Path: path, Body: string(data)}
 	}
 	if out == nil || len(bytes.TrimSpace(data)) == 0 {
 		return nil
 	}
 	if err := json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("decode response: %w", err)
+		return transientFailure(fmt.Sprintf("decode response: %v", err))
 	}
 	return nil
 }

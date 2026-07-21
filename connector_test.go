@@ -2,6 +2,7 @@ package beakslack
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -104,6 +105,21 @@ func TestValidateCredential_InvalidToken(t *testing.T) {
 	}
 }
 
+func TestValidateCredential_InvalidTokenInHTTP400Body(t *testing.T) {
+	client := &http.Client{Transport: testRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		response, err := testJSONResponse(map[string]any{"ok": false, "error": "invalid_auth"})
+		response.StatusCode = http.StatusBadRequest
+		return response, err
+	})}
+	result, err := (Connector{}).ValidateCredential(context.Background(), sdk.CredentialValidationRequest{
+		Credential: map[string]any{"bot_token": "bad", "signing_secret": testSigningSecret},
+		Runtime:    sdk.Runtime{HTTPClient: client},
+	})
+	if err != nil || result == nil || result.Valid {
+		t.Fatalf("result=%+v error=%v, want explicit credential rejection", result, err)
+	}
+}
+
 func TestValidateCredential_HTTPClientInjected(t *testing.T) {
 	var sawPath, sawMethod string
 	client := &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -123,6 +139,64 @@ func TestValidateCredential_HTTPClientInjected(t *testing.T) {
 	}
 	if sawMethod != http.MethodPost {
 		t.Fatalf("expected POST, saw %q", sawMethod)
+	}
+}
+
+func TestValidateCredential_TransientErrorRetriesThenReturnsGoError(t *testing.T) {
+	var calls int
+	client := &http.Client{Transport: testRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		response, err := testJSONResponse(map[string]any{"error": "temporary"})
+		response.StatusCode = http.StatusServiceUnavailable
+		return response, err
+	})}
+	result, err := (Connector{}).ValidateCredential(context.Background(), sdk.CredentialValidationRequest{
+		Credential: map[string]any{"bot_token": "xoxb-transient", "signing_secret": testSigningSecret},
+		Runtime:    sdk.Runtime{HTTPClient: client},
+	})
+	if err == nil || result != nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("result=%+v error=%v, want transient Go error", result, err)
+	}
+	if calls != credentialValidationAttempts {
+		t.Fatalf("calls=%d, want %d", calls, credentialValidationAttempts)
+	}
+}
+
+func TestValidateCredential_TransientErrorCanRecover(t *testing.T) {
+	var calls int
+	client := &http.Client{Transport: testRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			response, err := testJSONResponse(map[string]any{"error": "temporary"})
+			response.StatusCode = http.StatusServiceUnavailable
+			return response, err
+		}
+		return testJSONResponse(authTestOK())
+	})}
+	result, err := (Connector{}).ValidateCredential(context.Background(), sdk.CredentialValidationRequest{
+		Credential: map[string]any{"bot_token": "xoxb-retry", "signing_secret": testSigningSecret},
+		Runtime:    sdk.Runtime{HTTPClient: client},
+	})
+	if err != nil || result == nil || !result.Valid || calls != 2 {
+		t.Fatalf("result=%+v error=%v calls=%d", result, err, calls)
+	}
+}
+
+func TestValidateCredential_TransientSlackResponseReturnsGoError(t *testing.T) {
+	var calls int
+	client := &http.Client{Transport: testRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return testJSONResponse(map[string]any{"ok": false, "error": "internal_error"})
+	})}
+	result, err := (Connector{}).ValidateCredential(context.Background(), sdk.CredentialValidationRequest{
+		Credential: map[string]any{"bot_token": "xoxb-transient-body", "signing_secret": testSigningSecret},
+		Runtime:    sdk.Runtime{HTTPClient: client},
+	})
+	if err == nil || result != nil || !strings.Contains(err.Error(), "internal_error") {
+		t.Fatalf("result=%+v error=%v, want transient Go error", result, err)
+	}
+	if calls != credentialValidationAttempts {
+		t.Fatalf("calls=%d, want %d", calls, credentialValidationAttempts)
 	}
 }
 
@@ -427,6 +501,33 @@ func TestSend_Text(t *testing.T) {
 	if res.MessageID != "111.222" {
 		t.Fatalf("message id=%q", res.MessageID)
 	}
+}
+
+func TestSend_DoesNotSaveUnchangedStateAfterPlatformSuccess(t *testing.T) {
+	store := &failingSaveAccountStore{}
+	rt := makeRuntime(&fakeSDKGateway{}, store, sdkAccount("acct-1"))
+	rt.HTTPClient = httpClientReturning(map[string]any{"ok": true, "ts": "111.223"})
+	result, err := (Connector{}).Send(context.Background(), rt, sdk.OutboundMessage{AccountUUID: "acct-1", ChatID: "C1", Text: "hi"})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if result.MessageID != "111.223" || store.saveCalls != 0 {
+		t.Fatalf("result=%+v saveCalls=%d", result, store.saveCalls)
+	}
+}
+
+type failingSaveAccountStore struct {
+	state     map[string]any
+	saveCalls int
+}
+
+func (s *failingSaveAccountStore) LoadChannelAccountState(context.Context, string) (map[string]any, error) {
+	return s.state, nil
+}
+
+func (s *failingSaveAccountStore) SaveChannelAccountState(context.Context, string, map[string]any) error {
+	s.saveCalls++
+	return errors.New("state save failed")
 }
 
 func TestSend_ThreadReply(t *testing.T) {

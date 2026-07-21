@@ -18,8 +18,10 @@ import (
 )
 
 const (
-	ID       = "beak-agent-slack"
-	Platform = "slack"
+	ID                             = "beak-agent-slack"
+	Platform                       = "slack"
+	credentialValidationAttempts   = 2
+	credentialValidationRetryDelay = 100 * time.Millisecond
 )
 
 var ErrCredentialLogin = errors.New("slack connector uses credential login; create channel account from CredentialSchema")
@@ -96,17 +98,12 @@ func (Connector) ValidateCredential(ctx context.Context, req sdk.CredentialValid
 	client := platform.NewClient("", credentialStrings(credential))
 	client.HTTPClient = req.Runtime.HTTPClient
 
-	info, err := client.Validate(ctx)
+	info, err := validateSlackCredential(ctx, client)
 	if err != nil {
-		return &sdk.CredentialValidationResult{
-			Valid:       false,
-			AccountKey:  firstString(credential["account_id"], credential["bot_id"]),
-			DisplayName: firstString(credential["display_name"], credential["account_id"]),
-			Credential:  credential,
-			State:       stateMap,
-			Metadata:    map[string]any{"platform": Platform},
-			Error:       err.Error(),
-		}, nil
+		if platform.IsCredentialRejected(err) {
+			return credentialValidationFailure(credential, stateMap, err), nil
+		}
+		return nil, fmt.Errorf("slack credential validation failed: %w", err)
 	}
 
 	credential["account_id"] = info.AccountID
@@ -147,6 +144,51 @@ func (Connector) ValidateCredential(ctx context.Context, req sdk.CredentialValid
 			"bot_id":   info.BotID,
 		},
 	}, nil
+}
+
+func validateSlackCredential(ctx context.Context, client *platform.Client) (*platform.BotInfo, error) {
+	var lastErr error
+	for attempt := 0; attempt < credentialValidationAttempts; attempt++ {
+		info, err := client.Validate(ctx)
+		if err == nil {
+			return info, nil
+		}
+		lastErr = err
+		if platform.IsCredentialRejected(err) || !platform.IsRetryableError(err) || attempt+1 == credentialValidationAttempts {
+			break
+		}
+		if err := waitForCredentialRetry(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+func credentialValidationFailure(credential, stateMap map[string]any, err error) *sdk.CredentialValidationResult {
+	message := ""
+	if err != nil {
+		message = err.Error()
+	}
+	return &sdk.CredentialValidationResult{
+		Valid:       false,
+		AccountKey:  firstString(credential["account_id"], credential["bot_id"]),
+		DisplayName: firstString(credential["display_name"], credential["account_id"]),
+		Credential:  credential,
+		State:       stateMap,
+		Metadata:    map[string]any{"platform": Platform},
+		Error:       message,
+	}
+}
+
+func waitForCredentialRetry(ctx context.Context) error {
+	timer := time.NewTimer(credentialValidationRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (Connector) StartLogin(context.Context, sdk.LoginStartRequest) (*sdk.LoginChallenge, error) {
@@ -217,20 +259,10 @@ func (Connector) Send(ctx context.Context, runtime sdk.Runtime, req sdk.Outbound
 		return nil, fmt.Errorf("%s outbound text is required", Platform)
 	}
 
-	store := newConnectorStateStore(runtime.AccountStore)
-	store.seed(account)
-	st, err := store.LoadAccount(ctx, accountUUID)
-	if err != nil {
-		return nil, err
-	}
-
 	client := platform.NewClient("", credentialStrings(account.Credential))
 	client.HTTPClient = runtime.HTTPClient
 	messageID, err := client.SendText(ctx, req.ChatID, slackOutboundThreadTS(req), req.Text, req.Format, req.Mentions, req.MentionAll)
 	if err != nil {
-		return nil, err
-	}
-	if err := store.SaveAccount(ctx, st); err != nil {
 		return nil, err
 	}
 	return &sdk.SendResult{
