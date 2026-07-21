@@ -224,6 +224,33 @@ func (a *adapter) Acknowledge(ctx context.Context, req conformance.OutboundAck) 
 	}, nil
 }
 
+func (a *adapter) Send(ctx context.Context, req conformance.OutboundMessage) (*conformance.SendResult, error) {
+	account := sdk.ChannelAccount{
+		UUID:     req.AccountUUID,
+		Platform: "slack",
+		Credential: map[string]any{
+			"account_id": "T123:U_BOT", "bot_id": "B_BOT", "bot_user_id": "U_BOT",
+			"bot_token": "xoxb-test-token", "signing_secret": "test-signing-secret",
+		},
+		State: map[string]any{"team_id": "T123", "bot_id": "B_BOT", "bot_user_id": "U_BOT"},
+	}
+	result, err := a.conn.Send(ctx, sdk.Runtime{
+		Account: account, Accounts: []sdk.ChannelAccount{account},
+		AccountStore: newFakeAccountStore(), HTTPClient: fakeSlackAPIClient(),
+	}, sdk.OutboundMessage{
+		WorkspaceUUID: req.WorkspaceUUID, Platform: req.Platform, AccountUUID: req.AccountUUID,
+		ChannelUUID: req.ChannelUUID, SessionUUID: req.SessionUUID, MessageUUID: req.MessageUUID,
+		ChatType: req.ChatType, ChatID: req.ChatID, ThreadID: req.ThreadID, Text: req.Text,
+		Format: req.Format, Title: req.Title, Mentions: sdkMentions(req.Mentions), MentionAll: req.MentionAll, Raw: req.Raw,
+	})
+	if result == nil {
+		return nil, err
+	}
+	return &conformance.SendResult{
+		Platform: result.Platform, AccountUUID: result.AccountUUID, MessageID: result.MessageID, Raw: result.Raw,
+	}, err
+}
+
 func convertMentions(mentions []sdk.MentionIdentity) []conformance.MentionIdentity {
 	if len(mentions) == 0 {
 		return nil
@@ -231,6 +258,17 @@ func convertMentions(mentions []sdk.MentionIdentity) []conformance.MentionIdenti
 	out := make([]conformance.MentionIdentity, len(mentions))
 	for i, m := range mentions {
 		out[i] = conformance.MentionIdentity{ID: m.ID, IDType: m.IDType, DisplayName: m.DisplayName}
+	}
+	return out
+}
+
+func sdkMentions(mentions []conformance.MentionIdentity) []sdk.MentionIdentity {
+	if len(mentions) == 0 {
+		return nil
+	}
+	out := make([]sdk.MentionIdentity, len(mentions))
+	for i, mention := range mentions {
+		out[i] = sdk.MentionIdentity{ID: mention.ID, IDType: mention.IDType, DisplayName: mention.DisplayName}
 	}
 	return out
 }
@@ -272,6 +310,8 @@ func fakeSlackAPIClient() *http.Client {
 				return jsonResponse(`{"ok":false,"error":"invalid_arguments"}`), nil
 			}
 			return jsonResponse(`{"ok":true}`), nil
+		case "/api/chat.postMessage":
+			return jsonResponse(`{"ok":true,"channel":"C123","ts":"1710000001.000002","message":{"text":"Slack outbound"}}`), nil
 		default:
 			return jsonResponse(`{"ok":false,"error":"unknown_method"}`), nil
 		}

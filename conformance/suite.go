@@ -26,6 +26,7 @@ func Run(t *testing.T) {
 		CredentialValidator:      a,
 		InboundParser:            a,
 		Acknowledger:             a,
+		Sender:                   a,
 		CredentialCases: conformance.MustLoadJSON[[]conformance.CredentialValidationCase](
 			t, filepath.Join(fixtureRoot, "credential_cases.json"),
 		),
@@ -35,5 +36,13 @@ func Run(t *testing.T) {
 		AckCases: conformance.MustLoadJSON[[]conformance.AckCase](
 			t, filepath.Join(fixtureRoot, "ack_cases.json"),
 		),
+		SendCases: []conformance.SendCase{{
+			Name: "mrkdwn outbound exposes common send result",
+			Request: conformance.OutboundMessage{
+				AccountUUID: "T123:U_BOT", ChatType: "group", ChatID: "C123", ThreadID: "1710000000.000001",
+				MessageUUID: "message-send-slack", Text: "*Slack outbound*", Format: "markdown",
+			},
+			Expect: conformance.SendExpectation{MessageID: "1710000001.000002"},
+		}},
 	})
 }
