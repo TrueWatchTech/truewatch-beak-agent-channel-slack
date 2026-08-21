@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -50,6 +51,58 @@ func TestClientValidate(t *testing.T) {
 	}
 	if info.AccountID != "T1:U1" || info.TeamID != "T1" || info.BotID != "B1" || info.BotUserID != "U1" {
 		t.Fatalf("unexpected bot info: %#v", info)
+	}
+}
+
+func TestClientUploadFileAndTrustedDownloadURL(t *testing.T) {
+	path := t.TempDir() + "/image.png"
+	if err := os.WriteFile(path, []byte("image-bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient("https://slack.test/api", map[string]string{"bot_token": "xoxb-test"})
+	client.HTTPClient = &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/files.uploadV2":
+			if req.Header.Get("Authorization") != "Bearer xoxb-test" {
+				t.Fatalf("authorization=%q", req.Header.Get("Authorization"))
+			}
+			if err := req.ParseMultipartForm(1024 * 1024); err != nil {
+				t.Fatal(err)
+			}
+			file, header, err := req.FormFile("file")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = file.Close()
+			if header.Filename != "report.png" || req.FormValue("filename") != "report.png" {
+				t.Fatalf("uploaded filename=%q field=%q", header.Filename, req.FormValue("filename"))
+			}
+			return jsonResp(`{"ok":true,"files":[{"id":"F123"}]}`)
+		case "/private/file":
+			if req.Header.Get("Authorization") != "Bearer xoxb-test" {
+				t.Fatalf("authorization=%q", req.Header.Get("Authorization"))
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("downloaded"))}, nil
+		default:
+			t.Fatalf("unexpected request: %s", req.URL.Path)
+			return nil, nil
+		}
+	})}
+	fileID, err := client.UploadFile(context.Background(), path, "C1", "", "report.png")
+	if err != nil || fileID != "F123" {
+		t.Fatalf("fileID=%q err=%v", fileID, err)
+	}
+	downloadPath, cleanup, err := client.DownloadFile(context.Background(), "https://files.slack.com/private/file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(downloadPath)
+	if err != nil || string(data) != "downloaded" {
+		t.Fatalf("path=%q data=%q err=%v", downloadPath, data, err)
+	}
+	cleanup()
+	if _, _, err := client.DownloadFile(context.Background(), "https://evil.example/file"); err == nil {
+		t.Fatal("untrusted host should be rejected")
 	}
 }
 

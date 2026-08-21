@@ -106,6 +106,18 @@ type Message struct {
 	ParentUserID string `json:"parent_user_id,omitempty"`
 }
 
+// File is the subset of Slack's file object needed for rich-media bridging.
+type File struct {
+	ID                 string `json:"id,omitempty"`
+	Name               string `json:"name,omitempty"`
+	Title              string `json:"title,omitempty"`
+	Mimetype           string `json:"mimetype,omitempty"`
+	Filetype           string `json:"filetype,omitempty"`
+	Size               int64  `json:"size,omitempty"`
+	URLPrivate         string `json:"url_private,omitempty"`
+	URLPrivateDownload string `json:"url_private_download,omitempty"`
+}
+
 type conversationRepliesResponse struct {
 	OK       bool      `json:"ok"`
 	Error    string    `json:"error,omitempty"`
@@ -141,4 +153,5 @@ type InnerEvent struct {
 	ClientMsgID  string `json:"client_msg_id,omitempty"`
 	BotID        string `json:"bot_id,omitempty"`
 	AppID        string `json:"app_id,omitempty"`
+	Files        []File `json:"files,omitempty"`
 }

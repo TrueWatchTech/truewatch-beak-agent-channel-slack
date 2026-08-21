@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,6 +22,21 @@ import (
 const DefaultBaseURL = "https://slack.com/api"
 
 const defaultRequestTimeout = 15 * time.Second
+const maxMediaBytes int64 = 32 << 20
+
+func trustedSlackMediaURL(rawURL, baseURL string) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil, fmt.Errorf("slack media URL must be absolute HTTP or HTTPS")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	base, _ := url.Parse(strings.TrimSpace(baseURL))
+	baseHost := strings.ToLower(base.Hostname())
+	if host != "files.slack.com" && host != "slack.com" && !strings.HasSuffix(host, ".slack.com") && (baseHost == "" || host != baseHost) {
+		return nil, fmt.Errorf("slack media URL host is not trusted")
+	}
+	return parsed, nil
+}
 
 // Client is the Slack HTTP client. Credentials are kept in a map so the
 // scaffold stays platform-agnostic; read them with stringValue helpers in the
@@ -125,6 +143,159 @@ func (c *Client) SendText(ctx context.Context, chatID, threadTS, text, format st
 		return "", fmt.Errorf("slack chat.postMessage: %s", errMsg)
 	}
 	return resp.TS, nil
+}
+
+// DownloadFile downloads a Slack private file. The bearer token is only sent
+// to Slack's official file host or the configured API host.
+func (c *Client) DownloadFile(ctx context.Context, rawURL string) (string, func(), error) {
+	parsed, err := trustedSlackMediaURL(rawURL, c.BaseURL)
+	if err != nil {
+		return "", nil, err
+	}
+	token := strings.TrimSpace(c.Credential["bot_token"])
+	if token == "" {
+		return "", nil, fmt.Errorf("slack bot_token is required")
+	}
+	timeout := c.RequestTimeout
+	if timeout <= 0 {
+		timeout = defaultRequestTimeout
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return "", nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("User-Agent", "BeakAgentSlack/0.1.0")
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", nil, &HTTPError{StatusCode: resp.StatusCode, Method: http.MethodGet, Path: parsed.Path, Body: resp.Status}
+	}
+	tmp, err := os.CreateTemp("", "beak-slack-media-*")
+	if err != nil {
+		return "", nil, err
+	}
+	path := tmp.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if _, err := io.Copy(tmp, io.LimitReader(resp.Body, maxMediaBytes+1)); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return "", nil, err
+	}
+	if info, statErr := tmp.Stat(); statErr != nil {
+		_ = tmp.Close()
+		cleanup()
+		return "", nil, statErr
+	} else if info.Size() > maxMediaBytes {
+		_ = tmp.Close()
+		cleanup()
+		return "", nil, fmt.Errorf("slack media exceeds %d bytes", maxMediaBytes)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return path, cleanup, nil
+}
+
+// UploadFile creates a Slack file message in the requested channel/thread.
+func (c *Client) UploadFile(ctx context.Context, path, channelID, threadTS, title string) (string, error) {
+	path = strings.TrimSpace(path)
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("slack media path is not a regular file")
+	}
+	if info.Size() > maxMediaBytes {
+		return "", fmt.Errorf("slack media exceeds %d bytes", maxMediaBytes)
+	}
+	token := strings.TrimSpace(c.Credential["bot_token"])
+	if token == "" {
+		return "", fmt.Errorf("slack bot_token is required")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	uploadName := strings.TrimSpace(title)
+	if uploadName == "" {
+		uploadName = filepath.Base(path)
+	}
+	for key, value := range map[string]string{"channel_id": strings.TrimSpace(channelID), "thread_ts": strings.TrimSpace(threadTS), "filename": filepath.Base(uploadName), "title": strings.TrimSpace(title)} {
+		if value != "" {
+			if err := writer.WriteField(key, value); err != nil {
+				return "", err
+			}
+		}
+	}
+	part, err := writer.CreateFormFile("file", filepath.Base(uploadName))
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(part, io.LimitReader(file, maxMediaBytes+1)); err != nil {
+		return "", err
+	}
+	if err := writer.Close(); err != nil {
+		return "", err
+	}
+	timeout := c.RequestTimeout
+	if timeout <= 0 {
+		timeout = defaultRequestTimeout
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.url("files.uploadV2", nil), &body)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("User-Agent", "BeakAgentSlack/0.1.0")
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxMediaBytes))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", &HTTPError{StatusCode: resp.StatusCode, Method: http.MethodPost, Path: "files.uploadV2", Body: string(data)}
+	}
+	var result struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+		Files []struct {
+			ID string `json:"id"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", transientFailure(fmt.Sprintf("decode slack media upload response: %v", err))
+	}
+	if !result.OK || len(result.Files) == 0 || strings.TrimSpace(result.Files[0].ID) == "" {
+		return "", slackAPIError("files.uploadV2", firstNonEmpty(result.Error, "missing_file_id"))
+	}
+	return result.Files[0].ID, nil
 }
 
 func (c *Client) ConversationInfo(ctx context.Context, channelID string) (*ChannelInfo, error) {

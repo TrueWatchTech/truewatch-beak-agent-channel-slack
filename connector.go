@@ -53,7 +53,8 @@ func (Connector) Metadata() sdk.ConnectorMetadata {
 		Capabilities: sdk.Capabilities{
 			LoginModes:          []string{sdk.LoginModeCredential},
 			Text:                true,
-			Media:               false,
+			Media:               true,
+			MediaKinds:          []string{sdk.MediaKindImage, sdk.MediaKindFile, sdk.MediaKindAudio, sdk.MediaKindVideo},
 			GroupChat:           true,
 			DirectChat:          true,
 			Stream:              false,
@@ -255,21 +256,65 @@ func (Connector) Send(ctx context.Context, runtime sdk.Runtime, req sdk.Outbound
 	if strings.TrimSpace(req.ChatID) == "" {
 		return nil, fmt.Errorf("%s outbound chat_id is required", Platform)
 	}
-	if strings.TrimSpace(req.Text) == "" {
-		return nil, fmt.Errorf("%s outbound text is required", Platform)
+	if strings.TrimSpace(req.Text) == "" && len(req.Attachments) == 0 {
+		return nil, fmt.Errorf("%s outbound text or attachments are required", Platform)
 	}
 
 	client := platform.NewClient("", credentialStrings(account.Credential))
 	client.HTTPClient = runtime.HTTPClient
-	messageID, err := client.SendText(ctx, req.ChatID, slackOutboundThreadTS(req), req.Text, req.Format, req.Mentions, req.MentionAll)
-	if err != nil {
-		return nil, err
+	threadTS := slackOutboundThreadTS(req)
+	result := &sdk.SendResult{Platform: Platform, AccountUUID: accountUUID, Raw: map[string]any{}}
+	if strings.TrimSpace(req.Text) != "" {
+		messageID, sendErr := client.SendText(ctx, req.ChatID, threadTS, req.Text, req.Format, req.Mentions, req.MentionAll)
+		if sendErr != nil {
+			return nil, sendErr
+		}
+		result.MessageID = messageID
 	}
-	return &sdk.SendResult{
-		Platform:    Platform,
-		AccountUUID: accountUUID,
-		MessageID:   messageID,
-	}, nil
+	var attachmentErrors []string
+	for _, attachment := range req.Attachments {
+		item := sdk.AttachmentSendResult{AttachmentID: attachment.ID, Kind: attachment.Kind, Status: sdk.AttachmentStatusFailed}
+		if validateErr := sdk.ValidateMediaAttachment(attachment); validateErr != nil {
+			item.Error = validateErr.Error()
+			attachmentErrors = append(attachmentErrors, item.Error)
+			result.AttachmentResults = append(result.AttachmentResults, item)
+			continue
+		}
+		path := strings.TrimSpace(attachment.Path)
+		cleanup := func() {}
+		if path == "" && strings.TrimSpace(attachment.URL) != "" {
+			item.Error = "slack outbound URL attachments require a host-materialized path"
+			attachmentErrors = append(attachmentErrors, item.Error)
+			result.AttachmentResults = append(result.AttachmentResults, item)
+			continue
+		}
+		if path == "" {
+			item.Error = "slack outbound attachment path is required"
+			attachmentErrors = append(attachmentErrors, item.Error)
+			result.AttachmentResults = append(result.AttachmentResults, item)
+			continue
+		}
+		fileID, uploadErr := client.UploadFile(ctx, path, req.ChatID, threadTS, attachment.FileName)
+		cleanup()
+		if uploadErr != nil {
+			item.Error = uploadErr.Error()
+			attachmentErrors = append(attachmentErrors, item.Error)
+			result.AttachmentResults = append(result.AttachmentResults, item)
+			continue
+		}
+		item.Status = sdk.AttachmentStatusSent
+		item.MessageID = fileID
+		item.PlatformResourceID = fileID
+		result.MessageID = firstString(fileID, result.MessageID)
+		result.AttachmentResults = append(result.AttachmentResults, item)
+	}
+	if len(attachmentErrors) > 0 {
+		result.Raw["attachment_errors"] = attachmentErrors
+	}
+	if result.MessageID == "" {
+		return result, fmt.Errorf("%s outbound attachments failed", Platform)
+	}
+	return result, nil
 }
 
 func (Connector) Acknowledge(ctx context.Context, runtime sdk.Runtime, req sdk.OutboundAck) (*sdk.AckResult, error) {
@@ -441,6 +486,15 @@ func (c Connector) processMessageEvent(ctx context.Context, runtime sdk.Runtime,
 	chatID := strings.TrimSpace(event.Channel)
 	senderID := strings.TrimSpace(event.User)
 	text := strings.TrimSpace(event.Text)
+	mediaClient := platform.NewClient("", credentialStrings(account.Credential))
+	mediaClient.HTTPClient = runtime.HTTPClient
+	attachments, cleanupAttachments, attachmentErrors := downloadSlackAttachments(ctx, mediaClient, event.Files)
+	if cleanupAttachments != nil {
+		defer cleanupAttachments()
+	}
+	if text == "" && (len(attachments) > 0 || len(attachmentErrors) > 0) {
+		text = slackAttachmentPlaceholder(attachments, attachmentErrors)
+	}
 
 	// 4. Mention detection. <!channel> and <!here> are Slack's literal
 	// broadcast-mention tokens; they address the whole channel, not this bot,
@@ -450,7 +504,7 @@ func (c Connector) processMessageEvent(ctx context.Context, runtime sdk.Runtime,
 	mentionAll := slackTextHasBroadcastMention(event.Text)
 
 	// 5. Text-only filter (skip non-text / incomplete events).
-	if chatType == "" || chatID == "" || senderID == "" || text == "" {
+	if chatType == "" || chatID == "" || senderID == "" || (text == "" && len(attachments) == 0 && len(attachmentErrors) == 0) {
 		return &EventResult{Type: event.Type, Ignored: true, Reason: "unsupported_message_type"}, nil
 	}
 
@@ -480,6 +534,7 @@ func (c Connector) processMessageEvent(ctx context.Context, runtime sdk.Runtime,
 		SenderDisplayName: senderDisplayName,
 		MessageID:         event.TS,
 		Text:              text,
+		Attachments:       attachments,
 		ReferencedMessage: referenced,
 		DedupeKey:         dedupeKey,
 		Mentions:          mentions,
@@ -496,6 +551,9 @@ func (c Connector) processMessageEvent(ctx context.Context, runtime sdk.Runtime,
 			"subtype":        event.Subtype,
 			"api_app_id":     envelope.APIAppID,
 		},
+	}
+	if len(attachmentErrors) > 0 {
+		inbound.Raw["attachment_errors"] = attachmentErrors
 	}
 
 	// 7a. Ensure the chat session (identity includes account uuid → two bots in
@@ -530,6 +588,7 @@ func (c Connector) processMessageEvent(ctx context.Context, runtime sdk.Runtime,
 		SenderID:      sdk.IMPersonParticipantID(Platform, chatType, chatID, senderID),
 		Content:       text,
 		DedupeKey:     dedupeKey,
+		Attachments:   inbound.Attachments,
 		Metadata: map[string]any{
 			"source":          Platform,
 			"slack_chat_type": chatType,
@@ -554,6 +613,76 @@ func (c Connector) processMessageEvent(ctx context.Context, runtime sdk.Runtime,
 		MessageUUID: messageUUID,
 		Inbound:     &inbound,
 	}, nil
+}
+
+func downloadSlackAttachments(ctx context.Context, client *platform.Client, files []platform.File) ([]sdk.MediaAttachment, func(), []string) {
+	if len(files) == 0 {
+		return nil, nil, nil
+	}
+	attachments := make([]sdk.MediaAttachment, 0, len(files))
+	cleanups := make([]func(), 0, len(files))
+	var errs []string
+	cleanup := func() {
+		for index := len(cleanups) - 1; index >= 0; index-- {
+			if cleanups[index] != nil {
+				cleanups[index]()
+			}
+		}
+	}
+	for _, file := range files {
+		rawURL := firstString(file.URLPrivateDownload, file.URLPrivate)
+		path, remove, err := client.DownloadFile(ctx, rawURL)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", firstString(file.ID, file.Name), err))
+			continue
+		}
+		cleanups = append(cleanups, remove)
+		kind := sdk.MediaKindFile
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(file.Mimetype)), "image/") {
+			kind = sdk.MediaKindImage
+		} else if strings.HasPrefix(strings.ToLower(strings.TrimSpace(file.Mimetype)), "audio/") {
+			kind = sdk.MediaKindAudio
+		} else if strings.HasPrefix(strings.ToLower(strings.TrimSpace(file.Mimetype)), "video/") {
+			kind = sdk.MediaKindVideo
+		}
+		attachments = append(attachments, sdk.MediaAttachment{
+			ID:                 file.ID,
+			Kind:               kind,
+			Source:             sdk.MediaSourcePath,
+			Path:               path,
+			ContentType:        file.Mimetype,
+			FileName:           firstString(file.Name, file.Title),
+			SizeBytes:          file.Size,
+			PlatformResourceID: file.ID,
+			Raw:                map[string]any{"url_private": file.URLPrivate, "url_private_download": file.URLPrivateDownload},
+		})
+	}
+	return attachments, cleanup, errs
+}
+
+func slackAttachmentPlaceholder(attachments []sdk.MediaAttachment, errors []string) string {
+	labels := make([]string, 0, len(attachments)+len(errors))
+	for _, attachment := range attachments {
+		label := "附件"
+		switch attachment.Kind {
+		case sdk.MediaKindImage:
+			label = "图片"
+		case sdk.MediaKindAudio:
+			label = "音频"
+		case sdk.MediaKindVideo:
+			label = "视频"
+		case sdk.MediaKindFile:
+			label = "文件"
+		}
+		if attachment.FileName != "" {
+			label += ": " + attachment.FileName
+		}
+		labels = append(labels, "["+label+"]")
+	}
+	for range errors {
+		labels = append(labels, "[附件下载失败]")
+	}
+	return strings.Join(labels, " ")
 }
 
 // jsonWebhookResponse builds a 200 JSON webhook response.
