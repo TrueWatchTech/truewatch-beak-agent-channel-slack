@@ -51,6 +51,7 @@ func (Connector) Metadata() sdk.ConnectorMetadata {
 		Label:       "Slack",
 		Description: "Connect Slack bot accounts to Beak Channel Gateway",
 		Capabilities: sdk.Capabilities{
+			Interactions:        sdk.InteractionCapabilities{ToolApproval: true, PlanConfirmation: true, Update: "always"},
 			LoginModes:          []string{sdk.LoginModeCredential},
 			Text:                true,
 			Media:               true,
@@ -245,6 +246,9 @@ func (c Connector) Start(ctx context.Context, runtime sdk.Runtime) error {
 }
 
 func (Connector) Send(ctx context.Context, runtime sdk.Runtime, req sdk.OutboundMessage) (*sdk.SendResult, error) {
+	if req.Interaction != nil {
+		return sendSlackInteraction(ctx, runtime, req)
+	}
 	account, err := selectRuntimeAccount(runtime, req.AccountUUID)
 	if err != nil {
 		return nil, err
@@ -379,6 +383,10 @@ func (c Connector) HandleWebhookRequest(ctx context.Context, runtime sdk.Runtime
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, fmt.Errorf("%s read webhook body: %w", Platform, err)
+	}
+
+	if strings.HasPrefix(req.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
+		return handleSlackInteraction(ctx, runtime, account, req, body)
 	}
 
 	var envelope platform.EventEnvelope
